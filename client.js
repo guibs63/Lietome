@@ -1,86 +1,102 @@
-const socket = io();
+document.addEventListener("DOMContentLoaded", () => {
 
-let currentProject = null;
+  const socket = io();
 
-const chat = document.getElementById("chat");
-const form = document.getElementById("chat-form");
-const input = document.getElementById("message");
-const usernameInput = document.getElementById("username");
-const projectSelect = document.getElementById("project");
+  let currentProject = null;
 
-// 🔹 Affichage message
-function addMessage(username, message) {
-  const div = document.createElement("div");
-  div.innerHTML = `<strong>${username}:</strong> ${message}`;
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-}
+  const chat = document.getElementById("chat");
+  const form = document.getElementById("chat-form");
+  const input = document.getElementById("message");
+  const usernameInput = document.getElementById("username");
+  const projectSelect = document.getElementById("project");
 
-// 🔹 Reconnexion automatique (IMPORTANT)
-socket.on("connect", () => {
-  console.log("🟢 Connected to server");
-
-  // Rejoindre le projet courant si défini
-  if (currentProject) {
-    socket.emit("joinProject", currentProject);
+  if (!chat || !form || !input || !usernameInput || !projectSelect) {
+    console.error("❌ DOM elements missing");
+    return;
   }
 
-  // Toujours recharger la liste des projets
-  socket.emit("getProjects");
-});
-
-// 🔹 Charger projets
-socket.on("projectList", (projects) => {
-  projectSelect.innerHTML = "";
-
-  projects.forEach((p) => {
-    const option = document.createElement("option");
-    option.value = p.name;
-    option.textContent = p.name;
-    projectSelect.appendChild(option);
-  });
-
-  // Si aucun projet sélectionné, prendre le premier
-  if (!currentProject && projects.length > 0) {
-    currentProject = projects[0].name;
-    socket.emit("joinProject", currentProject);
+  // 🔹 Affichage message
+  function addMessage(username, message) {
+    const div = document.createElement("div");
+    div.innerHTML = `<strong>${username}:</strong> ${message}`;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
   }
-});
 
-// 🔹 Changement de projet
-projectSelect.addEventListener("change", () => {
-  currentProject = projectSelect.value;
-  chat.innerHTML = "";
-  socket.emit("joinProject", currentProject);
-});
+  // 🔹 Reconnexion automatique
+  socket.on("connect", () => {
+    console.log("🟢 Connected to server");
 
-// 🔹 Réception historique
-socket.on("projectHistory", (messages) => {
-  chat.innerHTML = "";
-  messages.forEach((msg) => {
-    addMessage(msg.username, msg.message);
-  });
-});
+    socket.emit("getProjects");
 
-// 🔹 Réception message live
-socket.on("chatMessage", (data) => {
-  addMessage(data.username, data.message);
-});
-
-// 🔹 Envoi message
-form.addEventListener("submit", (e) => {
-  e.preventDefault();
-
-  const username = usernameInput.value.trim();
-  const message = input.value.trim();
-
-  if (!username || !message || !currentProject) return;
-
-  socket.emit("chatMessage", {
-    username,
-    message,
-    project: currentProject,
+    if (currentProject) {
+      socket.emit("joinProject", currentProject);
+    }
   });
 
-  input.value = "";
+  // 🔹 Liste projets
+  socket.on("projectList", (projects) => {
+    console.log("📂 Projects received:", projects);
+
+    projectSelect.innerHTML = "";
+
+    projects.forEach((p) => {
+      const option = document.createElement("option");
+      option.value = p.name;
+      option.textContent = p.name;
+      projectSelect.appendChild(option);
+    });
+
+    if (projects.length > 0 && !currentProject) {
+      currentProject = projects[0].name;
+      socket.emit("joinProject", currentProject);
+    }
+  });
+
+  // 🔹 Changement projet
+  projectSelect.addEventListener("change", () => {
+    currentProject = projectSelect.value;
+    chat.innerHTML = "";
+    socket.emit("joinProject", currentProject);
+  });
+
+  // 🔹 Historique
+  socket.on("projectHistory", (messages) => {
+    console.log("📜 History received:", messages);
+
+    chat.innerHTML = "";
+    messages.forEach((msg) => {
+      addMessage(msg.username, msg.message);
+    });
+  });
+
+  // 🔹 Message live
+  socket.on("chatMessage", (data) => {
+    console.log("💬 Live message:", data);
+    addMessage(data.username, data.message);
+  });
+
+  // 🔹 Envoi message
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+
+    const username = usernameInput.value.trim();
+    const message = input.value.trim();
+
+    if (!username || !message || !currentProject) {
+      console.warn("⚠ Missing data:", username, message, currentProject);
+      return;
+    }
+
+    console.log("📤 Sending message:", { username, message, project: currentProject });
+
+    socket.emit("chatMessage", {
+      username,
+      message,
+      project: currentProject,
+    });
+
+    input.value = "";
+  });
+
 });
