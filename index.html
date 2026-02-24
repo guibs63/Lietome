@@ -1,39 +1,126 @@
-<script>
-const socket = io();
-let currentProject = null;
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Lietome Live 🚀</title>
 
-function join() {
-  currentProject = document.getElementById("project").value;
-  document.getElementById("messages").innerHTML = "";
-  socket.emit("joinProject", currentProject);
-}
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
 
-socket.on("projectHistory", (messages) => {
-  messages.forEach(msg => addMessage(msg.username, msg.message));
-});
+    #messages {
+      height: 400px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin-top: 10px;
+      margin-bottom: 10px;
+    }
 
-socket.on("chatMessage", (data) => {
-  addMessage(data.username, data.message);
-});
+    input, select, button {
+      margin: 5px 0;
+    }
+  </style>
 
-function sendMessage() {
-  const username = document.getElementById("username").value;
-  const message = document.getElementById("message").value;
+  <!-- 🔥 IMPORTANT : defer garantit que io est prêt -->
+  <script src="/socket.io/socket.io.js" defer></script>
+</head>
+<body>
 
-  if (!message || !currentProject || !username) return;
+<h2>Lietome Live 🚀</h2>
 
-  socket.emit("chatMessage", {
-    project: currentProject,
-    username: username, // 🔥 correspond au serveur
-    message: message
+<label>Pseudo:</label>
+<input id="username" placeholder="Guillaume">
+
+<label>Projet:</label>
+<select id="project">
+  <option value="Ever">Ever</option>
+  <option value="Hydrai">Hydrai</option>
+  <option value="Sentia">Sentia</option>
+</select>
+
+<button id="joinBtn">Rejoindre</button>
+
+<hr>
+
+<div id="messages"></div>
+
+<input id="message" placeholder="Message..." style="width:80%">
+<button id="sendBtn">Envoyer</button>
+
+<script defer>
+document.addEventListener("DOMContentLoaded", () => {
+
+  if (typeof io === "undefined") {
+    console.error("❌ Socket.io not loaded");
+    return;
+  }
+
+  const socket = io();
+  console.log("🟢 Socket initialized");
+
+  let currentProject = null;
+
+  const usernameInput = document.getElementById("username");
+  const projectSelect = document.getElementById("project");
+  const messagesDiv = document.getElementById("messages");
+  const messageInput = document.getElementById("message");
+  const joinBtn = document.getElementById("joinBtn");
+  const sendBtn = document.getElementById("sendBtn");
+
+  function addMessage(username, message) {
+    const div = document.createElement("div");
+    div.innerHTML = "<b>" + username + ":</b> " + message;
+    messagesDiv.appendChild(div);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  }
+
+  // 🔹 Rejoindre un projet
+  joinBtn.addEventListener("click", () => {
+    currentProject = projectSelect.value;
+    messagesDiv.innerHTML = "";
+    socket.emit("joinProject", currentProject);
+    console.log("🔵 Joined project:", currentProject);
   });
 
-  document.getElementById("message").value = "";
-}
+  // 🔹 Recevoir historique
+  socket.on("projectHistory", (messages) => {
+    console.log("📜 History received:", messages);
+    messagesDiv.innerHTML = "";
+    messages.forEach(msg => {
+      addMessage(msg.username, msg.message);
+    });
+  });
 
-function addMessage(username, message) {
-  const div = document.createElement("div");
-  div.innerHTML = "<b>" + username + ":</b> " + message;
-  document.getElementById("messages").appendChild(div);
-}
+  // 🔹 Recevoir message live
+  socket.on("chatMessage", (data) => {
+    console.log("💬 Live message:", data);
+    addMessage(data.username, data.message);
+  });
+
+  // 🔹 Envoyer message
+  sendBtn.addEventListener("click", () => {
+    const username = usernameInput.value.trim();
+    const message = messageInput.value.trim();
+
+    if (!username || !message || !currentProject) {
+      console.warn("⚠ Missing username, message or project");
+      return;
+    }
+
+    socket.emit("chatMessage", {
+      project: currentProject,
+      username: username,
+      message: message
+    });
+
+    messageInput.value = "";
+  });
+
+});
 </script>
+
+</body>
+</html>
