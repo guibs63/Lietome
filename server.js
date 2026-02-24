@@ -1,5 +1,4 @@
 const express = require("express");
-const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
 const OpenAI = require("openai");
@@ -7,45 +6,29 @@ const OpenAI = require("openai");
 const app = express();
 const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: { origin: "*" },
-});
-
-app.use(cors());
-app.use(express.json());
-app.use(express.static("public"));
+const io = new Server(server);
 
 const PORT = process.env.PORT || 8080;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+app.use(express.static("public"));
+
+app.get("/ping", (req, res) => {
+  res.send("pong");
 });
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log("Socket connected:", socket.id);
 
   socket.on("chatMessage", async (data) => {
-    const { username, message } = data;
-
-    io.emit("chatMessage", { username, message });
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are Sensi." },
-        { role: "user", content: message },
-      ],
-    });
-
-    const reply = completion.choices[0].message.content;
+    console.log("Message reçu:", data);
 
     io.emit("chatMessage", {
-      username: "Sensi",
-      message: reply,
+      username: data.username,
+      message: data.message,
     });
   });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Server running on port " + PORT);
+  console.log("🚀 Running on " + PORT);
 });
