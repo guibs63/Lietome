@@ -100,23 +100,34 @@ io.on("connection", (socket) => {
 
     io.to(project).emit("chatMessage", data);
 
-    // ===== SENSI =====
+    // ===== SENSI (répond uniquement si @sensi) =====
+    if (!message.toLowerCase().includes("@sensi")) return;
+
     try {
       db.all(
-        "SELECT username, message FROM messages WHERE project = ? ORDER BY timestamp ASC LIMIT 20",
+        `
+        SELECT username, message 
+        FROM messages 
+        WHERE project = ? 
+        ORDER BY timestamp DESC 
+        LIMIT 20
+        `,
         [project],
         async (err, history) => {
           if (err) return;
+
+          // Remettre dans l’ordre chronologique
+          history.reverse();
 
           const messages = [
             {
               role: "system",
               content:
-                "Tu es Sensi, une IA collaborative intégrée à un projet. Tu aides à structurer, analyser, améliorer les idées.",
+                "Tu es Sensi, une IA collaborative intégrée à un projet. Tu aides à structurer, analyser et améliorer les idées.",
             },
             ...history.map((m) => ({
               role: m.username === "Sensi" ? "assistant" : "user",
-              content: `${m.username}: ${m.message}`,
+              content: m.message.replace(/@sensi/gi, "").trim(),
             })),
           ];
 
