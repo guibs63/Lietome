@@ -4,11 +4,12 @@ const { Server } = require("socket.io");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
 const OpenAI = require("openai");
+const multer = require("multer");
+const fs = require("fs");
 
 const app = express();
 const server = http.createServer(app);
 
-// 🔥 IMPORTANT POUR RAILWAY
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -19,7 +20,6 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 8080;
 
-// ===== OPENAI =====
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -46,9 +46,53 @@ db.serialize(() => {
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS project_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project TEXT,
+      filename TEXT,
+      filepath TEXT,
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 });
 
-// ===== STATIC FILES =====
+// ===== UPLOAD CONFIG =====
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads");
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, "uploads/"),
+  filename: (req, file, cb) =>
+    cb(null, Date.now() + "-" + file.originalname),
+});
+
+const upload = multer({ storage });
+
+// Route upload
+app.post("/upload", upload.single("file"), (req, res) => {
+  const { project } = req.body;
+  const file = req.file;
+
+  if (!file || !project) {
+    return res.status(400).send("Missing file or project");
+  }
+
+  db.run(
+    "INSERT INTO project_files (project, filename, filepath) VALUES (?, ?, ?)",
+    [project, file.originalname, file.path],
+    () => {
+      res.json({ success: true });
+    }
+  );
+});
+
+// Servir fichiers uploadés
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Static
 app.use(express.static(path.resolve(".")));
 
 app.get("/", (req, res) => {
@@ -59,34 +103,9 @@ app.get("/", (req, res) => {
 io.on("connection", (socket) => {
   console.log("🟢 User connected");
 
-  // 🔹 Charger liste projets
-  socket.on("getProjects", () => {
-    db.all("SELECT * FROM projects", (err, rows) => {
-      if (!err) socket.emit("projectList", rows);
-    });
-  });
-
-  // 🔹 Créer projet
-  socket.on("createProject", (projectName) => {
-    if (!projectName) return;
-
-    db.run(
-      "INSERT OR IGNORE INTO projects (name) VALUES (?)",
-      [projectName],
-      () => {
-        db.all("SELECT * FROM projects", (err, rows) => {
-          if (!err) io.emit("projectList", rows);
-        });
-      }
-    );
-  });
-
-  // 🔹 Rejoindre projet
-  socket.on("joinProject", (project) => {
+  socket.on("joinProject", ({ project, username }) => {
     if (!project) return;
-
     socket.join(project);
-    console.log(`🔵 Socket joined project: ${project}`);
 
     db.all(
       "SELECT * FROM messages WHERE project = ? ORDER BY timestamp ASC",
@@ -95,85 +114,36 @@ io.on("connection", (socket) => {
         if (!err) socket.emit("projectHistory", rows);
       }
     );
+
+    db.all(
+      "SELECT * FROM project_files WHERE project = ?",
+      [project],
+      (err, rows) => {
+        if (!err) socket.emit("fileList", rows);
+      }
+    );
   });
 
-  // 🔹 Message utilisateur
-  socket.on("chatMessage", async (data) => {
+  socket.on("chatMessage", (data) => {
     const { username, message, project } = data;
-
     if (!username || !message || !project) return;
 
-    console.log("📩 Message reçu :", username, message, project);
-
-    // 1️⃣ Enregistrer message utilisateur
     db.run(
       "INSERT INTO messages (username, message, project) VALUES (?, ?, ?)",
-      [username, message, project]
+      [username, message, project],
+      function () {
+        io.in(project).emit("chatMessage", {
+          id: this.lastID,
+          username,
+          message,
+          project,
+        });
+      }
     );
-
-    // 2️⃣ Envoyer immédiatement aux membres du projet
-    io.in(project).emit("chatMessage", data);
-
-    // 3️⃣ SENSI uniquement si mentionnée
-    if (!message.toLowerCase().includes("@sensi")) return;
-
-    try {
-      db.all(
-        `
-        SELECT username, message 
-        FROM messages 
-        WHERE project = ? 
-        ORDER BY timestamp DESC 
-        LIMIT 20
-        `,
-        [project],
-        async (err, history) => {
-          if (err) return;
-
-          history.reverse();
-
-          const messages = [
-            {
-              role: "system",
-              content:
-                "Tu es Sensi, une IA collaborative intégrée à un projet. Tu aides à structurer, analyser et améliorer les idées.",
-            },
-            ...history.map((m) => ({
-              role: m.username === "Sensi" ? "assistant" : "user",
-              content: m.message.replace(/@sensi/gi, "").trim(),
-            })),
-          ];
-
-          const response = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages,
-          });
-
-          const reply = response.choices[0].message.content;
-
-          db.run(
-            "INSERT INTO messages (username, message, project) VALUES (?, ?, ?)",
-            ["Sensi", reply, project]
-          );
-
-          io.in(project).emit("chatMessage", {
-            username: "Sensi",
-            message: reply,
-            project,
-          });
-        }
-      );
-    } catch (error) {
-      console.error("❌ OpenAI error:", error);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    console.log("🔴 User disconnected");
   });
 });
 
-// ===== START =====
+// START
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });

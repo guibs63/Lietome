@@ -1,122 +1,97 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html>
 <head>
   <meta charset="UTF-8">
   <title>Lietome Live 🚀</title>
-
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 20px;
-    }
-
-    #messages {
-      height: 400px;
-      overflow-y: auto;
-      border: 1px solid #ccc;
-      padding: 10px;
-      margin-top: 10px;
-      margin-bottom: 10px;
-    }
-
-    input, select, button {
-      margin: 5px 0;
-    }
-  </style>
-
-  <!-- 🔥 IMPORTANT : defer garantit que io est prêt -->
   <script src="/socket.io/socket.io.js" defer></script>
 </head>
 <body>
 
 <h2>Lietome Live 🚀</h2>
 
-<label>Pseudo:</label>
-<input id="username" placeholder="Guillaume">
-
-<label>Projet:</label>
+<input id="username" placeholder="Pseudo">
 <select id="project">
   <option value="Ever">Ever</option>
-  <option value="Hydrai">Hydrai</option>
-  <option value="Sentia">Sentia</option>
 </select>
 
 <button id="joinBtn">Rejoindre</button>
 
 <hr>
 
-<div id="messages"></div>
+<div id="messages" style="height:300px; overflow:auto; border:1px solid #ccc;"></div>
 
-<input id="message" placeholder="Message..." style="width:80%">
+<input id="message" placeholder="Message..." style="width:60%">
 <button id="sendBtn">Envoyer</button>
+
+<!-- Upload -->
+<input type="file" id="fileInput" style="display:none">
+<button id="uploadBtn">+</button>
+
+<ul id="fileList"></ul>
 
 <script defer>
 document.addEventListener("DOMContentLoaded", () => {
 
-  if (typeof io === "undefined") {
-    console.error("❌ Socket.io not loaded");
-    return;
-  }
-
   const socket = io();
-  console.log("🟢 Socket initialized");
-
   let currentProject = null;
 
-  const usernameInput = document.getElementById("username");
-  const projectSelect = document.getElementById("project");
-  const messagesDiv = document.getElementById("messages");
-  const messageInput = document.getElementById("message");
   const joinBtn = document.getElementById("joinBtn");
   const sendBtn = document.getElementById("sendBtn");
+  const uploadBtn = document.getElementById("uploadBtn");
+  const fileInput = document.getElementById("fileInput");
 
-  function addMessage(username, message) {
-    const div = document.createElement("div");
-    div.innerHTML = "<b>" + username + ":</b> " + message;
-    messagesDiv.appendChild(div);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-  }
-
-  // 🔹 Rejoindre un projet
   joinBtn.addEventListener("click", () => {
-    currentProject = projectSelect.value;
-    messagesDiv.innerHTML = "";
-    socket.emit("joinProject", currentProject);
-    console.log("🔵 Joined project:", currentProject);
-  });
-
-  // 🔹 Recevoir historique
-  socket.on("projectHistory", (messages) => {
-    console.log("📜 History received:", messages);
-    messagesDiv.innerHTML = "";
-    messages.forEach(msg => {
-      addMessage(msg.username, msg.message);
+    currentProject = document.getElementById("project").value;
+    socket.emit("joinProject", {
+      project: currentProject,
+      username: document.getElementById("username").value
     });
   });
 
-  // 🔹 Recevoir message live
-  socket.on("chatMessage", (data) => {
-    console.log("💬 Live message:", data);
-    addMessage(data.username, data.message);
-  });
-
-  // 🔹 Envoyer message
   sendBtn.addEventListener("click", () => {
-    const username = usernameInput.value.trim();
-    const message = messageInput.value.trim();
-
-    if (!username || !message || !currentProject) {
-      console.warn("⚠ Missing username, message or project");
-      return;
-    }
-
     socket.emit("chatMessage", {
       project: currentProject,
-      username: username,
-      message: message
+      username: document.getElementById("username").value,
+      message: document.getElementById("message").value
+    });
+    document.getElementById("message").value = "";
+  });
+
+  socket.on("chatMessage", (data) => {
+    const div = document.createElement("div");
+    div.innerHTML = `<b>${data.username}:</b> ${data.message}`;
+    document.getElementById("messages").appendChild(div);
+  });
+
+  // Upload
+  uploadBtn.addEventListener("click", () => {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file || !currentProject) return;
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("project", currentProject);
+
+    await fetch("/upload", {
+      method: "POST",
+      body: formData
     });
 
-    messageInput.value = "";
+    alert("Fichier ajouté ✅");
+  });
+
+  socket.on("fileList", (files) => {
+    const ul = document.getElementById("fileList");
+    ul.innerHTML = "";
+    files.forEach(f => {
+      const li = document.createElement("li");
+      li.innerHTML = `<a href="/${f.filepath}" target="_blank">${f.filename}</a>`;
+      ul.appendChild(li);
+    });
   });
 
 });
