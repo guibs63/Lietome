@@ -1,101 +1,114 @@
 <!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>Lietome Live 🚀</title>
-  <script src="/socket.io/socket.io.js" defer></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+
+    #chat {
+      border: 1px solid #ccc;
+      height: 400px;
+      overflow-y: auto;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+
+    #chat div {
+      margin-bottom: 5px;
+    }
+
+    input, select, button {
+      padding: 5px;
+      margin-right: 5px;
+    }
+  </style>
 </head>
 <body>
 
-<h2>Lietome Live 🚀</h2>
+  <h1>Lietome Live 🚀</h1>
 
-<input id="username" placeholder="Pseudo">
-<select id="project">
-  <option value="Ever">Ever</option>
-</select>
+  <input type="text" id="username" placeholder="Pseudo" />
+  
+  <select id="project">
+    <option value="Ever">Ever</option>
+    <option value="Tintin">Tintin</option>
+    <option value="Sensi">Sensi</option>
+  </select>
 
-<button id="joinBtn">Rejoindre</button>
+  <button onclick="joinProject()">Rejoindre</button>
 
-<hr>
+  <hr>
 
-<div id="messages" style="height:300px; overflow:auto; border:1px solid #ccc;"></div>
+  <div id="chat"></div>
 
-<input id="message" placeholder="Message..." style="width:60%">
-<button id="sendBtn">Envoyer</button>
+  <form id="chat-form">
+    <input type="text" id="message" placeholder="Message..." autocomplete="off" />
+    <button type="submit">Envoyer</button>
+  </form>
 
-<!-- Upload -->
-<input type="file" id="fileInput" style="display:none">
-<button id="uploadBtn">+</button>
+  <!-- ✅ CDN officiel socket.io -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
-<ul id="fileList"></ul>
+  <script>
+    const socket = io();
 
-<script defer>
-document.addEventListener("DOMContentLoaded", () => {
+    let currentProject = null;
 
-  const socket = io();
-  let currentProject = null;
+    const chat = document.getElementById("chat");
+    const form = document.getElementById("chat-form");
+    const input = document.getElementById("message");
+    const usernameInput = document.getElementById("username");
+    const projectSelect = document.getElementById("project");
 
-  const joinBtn = document.getElementById("joinBtn");
-  const sendBtn = document.getElementById("sendBtn");
-  const uploadBtn = document.getElementById("uploadBtn");
-  const fileInput = document.getElementById("fileInput");
+    function addMessage(username, message) {
+      const div = document.createElement("div");
+      div.innerHTML = "<strong>" + username + ":</strong> " + message;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
 
-  joinBtn.addEventListener("click", () => {
-    currentProject = document.getElementById("project").value;
-    socket.emit("joinProject", {
-      project: currentProject,
-      username: document.getElementById("username").value
+    function joinProject() {
+      const username = usernameInput.value.trim();
+      const project = projectSelect.value;
+
+      if (!username) {
+        alert("Entre un pseudo");
+        return;
+      }
+
+      currentProject = project;
+      socket.emit("joinProject", { username, project });
+
+      addMessage("SYSTEM", "Connecté au projet " + project);
+    }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+
+      const message = input.value.trim();
+      const username = usernameInput.value.trim();
+
+      if (!message || !currentProject) return;
+
+      socket.emit("chatMessage", {
+        username,
+        message,
+        project: currentProject
+      });
+
+      input.value = "";
     });
-  });
 
-  sendBtn.addEventListener("click", () => {
-    socket.emit("chatMessage", {
-      project: currentProject,
-      username: document.getElementById("username").value,
-      message: document.getElementById("message").value
+    socket.on("chatMessage", function (data) {
+      if (data.project === currentProject) {
+        addMessage(data.username, data.message);
+      }
     });
-    document.getElementById("message").value = "";
-  });
-
-  socket.on("chatMessage", (data) => {
-    const div = document.createElement("div");
-    div.innerHTML = `<b>${data.username}:</b> ${data.message}`;
-    document.getElementById("messages").appendChild(div);
-  });
-
-  // Upload
-  uploadBtn.addEventListener("click", () => {
-    fileInput.click();
-  });
-
-  fileInput.addEventListener("change", async () => {
-    const file = fileInput.files[0];
-    if (!file || !currentProject) return;
-
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("project", currentProject);
-
-    await fetch("/upload", {
-      method: "POST",
-      body: formData
-    });
-
-    alert("Fichier ajouté ✅");
-  });
-
-  socket.on("fileList", (files) => {
-    const ul = document.getElementById("fileList");
-    ul.innerHTML = "";
-    files.forEach(f => {
-      const li = document.createElement("li");
-      li.innerHTML = `<a href="/${f.filepath}" target="_blank">${f.filename}</a>`;
-      ul.appendChild(li);
-    });
-  });
-
-});
-</script>
+  </script>
 
 </body>
 </html>
