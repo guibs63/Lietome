@@ -5,52 +5,68 @@ const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
 const usernameInput = document.getElementById("username");
 const projectSelect = document.getElementById("project");
-const joinBtn = document.getElementById("join");
 
 let currentProject = null;
+let typingIndicator = null;
+
+// =======================
+// LOAD PROJECTS
+// =======================
+
+async function loadProjects() {
+  const res = await fetch("/projects");
+  const projects = await res.json();
+
+  projectSelect.innerHTML = "";
+
+  projects.forEach(p => {
+    const option = document.createElement("option");
+    option.value = p.name;
+    option.textContent = p.name;
+    projectSelect.appendChild(option);
+  });
+}
+
+loadProjects();
 
 // =======================
 // UI
 // =======================
 
-function addMessage(username, message, role = "user") {
+function addMessage(id, username, message, role) {
   const div = document.createElement("div");
+  div.dataset.id = id;
 
-  if (role === "assistant") {
-    div.innerHTML = `<strong style="color:#7c3aed;">${username}:</strong> ${message}`;
-  } else if (role === "system") {
-    div.innerHTML = `<strong style="color:#999;">${username}:</strong> ${message}`;
-  } else {
-    div.innerHTML = `<strong>${username}:</strong> ${message}`;
-  }
+  let color = role === "assistant" ? "#7c3aed" : "#000";
+
+  div.innerHTML = `
+    <strong style="color:${color}">${username}:</strong> ${message}
+    <button data-id="${id}" class="delete-btn">🗑</button>
+  `;
 
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
 
-function clearChat() {
-  chat.innerHTML = "";
-}
+chat.addEventListener("click", async (e) => {
+  if (!e.target.classList.contains("delete-btn")) return;
+
+  const id = e.target.dataset.id;
+
+  await fetch(`/messages/${id}`, { method: "DELETE" });
+
+  const msg = document.querySelector(`[data-id='${id}']`);
+  if (msg) msg.remove();
+});
 
 // =======================
 // JOIN PROJECT
 // =======================
 
-joinBtn.addEventListener("click", () => {
-
-  const project = projectSelect.value;
-  const username = usernameInput.value.trim();
-
-  if (!username || !project) return;
-
-  if (currentProject === project) return;
-
-  currentProject = project;
-
-  socket.emit("join project", { project });
-
-  clearChat();
-  addMessage("SYSTEM", `Connecté au projet ${project}`, "system");
+projectSelect.addEventListener("change", () => {
+  currentProject = projectSelect.value;
+  chat.innerHTML = "";
+  socket.emit("join project", { project: currentProject });
 });
 
 // =======================
@@ -64,8 +80,6 @@ form.addEventListener("submit", (e) => {
   const username = usernameInput.value.trim();
 
   if (!message || !username || !currentProject) return;
-
-  addMessage(username, message, "user");
 
   socket.emit("chat message", {
     username,
@@ -81,31 +95,38 @@ form.addEventListener("submit", (e) => {
 // =======================
 
 socket.on("chat message", (data) => {
-  if (!currentProject) return;
-
   if (data.project !== currentProject) return;
-
-  const role = data.username === "Sensi" ? "assistant" : "user";
-
-  addMessage(data.username, data.message, role);
+  addMessage(data.id, data.username, data.message, data.username === "Sensi" ? "assistant" : "user");
 });
 
 // =======================
-// LOAD HISTORY
+// HISTORY
 // =======================
 
 socket.on("chat history", (messages) => {
-
-  clearChat();
-
-  messages.forEach((msg) => {
-    const role =
-      msg.role === "assistant"
-        ? "assistant"
-        : msg.role === "system"
-        ? "system"
-        : "user";
-
-    addMessage(msg.username, msg.content, role);
+  chat.innerHTML = "";
+  messages.forEach(msg => {
+    addMessage(msg.id, msg.username, msg.content, msg.role);
   });
+});
+
+// =======================
+// TYPING
+// =======================
+
+socket.on("typing", (data) => {
+  if (data.project !== currentProject) return;
+
+  if (!typingIndicator) {
+    typingIndicator = document.createElement("div");
+    typingIndicator.innerHTML = "<em>Sensi est en train d'écrire...</em>";
+    chat.appendChild(typingIndicator);
+  }
+});
+
+socket.on("stop typing", () => {
+  if (typingIndicator) {
+    typingIndicator.remove();
+    typingIndicator = null;
+  }
 });

@@ -40,11 +40,53 @@ const openai = new OpenAI({
 });
 
 // =======================
-// ROOT
+// PROJECT CRUD
 // =======================
 
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/index.html");
+app.get("/projects", async (req, res) => {
+  const result = await pool.query(
+    "SELECT name FROM projects ORDER BY created_at ASC"
+  );
+  res.json(result.rows);
+});
+
+app.post("/projects", async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: "Name required" });
+
+  try {
+    await pool.query(
+      "INSERT INTO projects (name) VALUES ($1)",
+      [name.trim()]
+    );
+    res.json({ success: true });
+  } catch {
+    res.status(400).json({ error: "Project exists" });
+  }
+});
+
+app.delete("/projects/:name", async (req, res) => {
+  const name = req.params.name;
+
+  await pool.query("DELETE FROM messages WHERE project = $1", [name]);
+  await pool.query("DELETE FROM projects WHERE name = $1", [name]);
+
+  res.json({ success: true });
+});
+
+// =======================
+// SOFT DELETE MESSAGE
+// =======================
+
+app.delete("/messages/:id", async (req, res) => {
+  const { id } = req.params;
+
+  await pool.query(
+    "UPDATE messages SET deleted = TRUE WHERE id = $1",
+    [id]
+  );
+
+  res.json({ success: true });
 });
 
 // =======================
@@ -55,101 +97,93 @@ io.on("connection", (socket) => {
 
   console.log("🔌 User connected:", socket.id);
 
-  // JOIN PROJECT
   socket.on("join project", async ({ project }) => {
 
     if (!project) return;
 
     socket.join(project);
-    socket.project = project;
 
-    console.log(`📂 Joined project ${project}`);
+    const result = await pool.query(
+      `SELECT id, username, content, role, project, created_at
+       FROM messages
+       WHERE project = $1 AND deleted = FALSE
+       ORDER BY created_at ASC`,
+      [project]
+    );
 
-    try {
-      const result = await pool.query(
-        `SELECT username, content, role, project, created_at
-         FROM messages
-         WHERE project = $1
-         ORDER BY created_at ASC`,
-        [project]
-      );
-
-      socket.emit("chat history", result.rows);
-
-    } catch (err) {
-      console.error("❌ History error:", err);
-    }
+    socket.emit("chat history", result.rows);
   });
 
-  // MESSAGE
   socket.on("chat message", async (data) => {
 
-    console.log("📩 DATA RECEIVED:", data);
-
     const { username, message, project } = data;
-
     if (!username || !message || !project) return;
 
-    try {
+    // Save user message
+    const insertUser = await pool.query(
+      "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
+      [username, message, project, "user"]
+    );
 
-      // Save user message
-      await pool.query(
-        "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4)",
-        [username, message, project, "user"]
-      );
+    const userId = insertUser.rows[0].id;
 
-      // Load last 20 messages
-      const historyResult = await pool.query(
-        `SELECT role, content
-         FROM messages
-         WHERE project = $1
-         ORDER BY created_at DESC
-         LIMIT 20`,
-        [project]
-      );
+    io.to(project).emit("chat message", {
+      id: userId,
+      username,
+      message,
+      project,
+    });
 
-      const previousMessages = historyResult.rows
-        .reverse()
-        .map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        }));
+    io.to(project).emit("typing", {
+      username: "Sensi",
+      project,
+    });
 
-      // Generate AI
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are Sensi, AI assistant for project ${project}.
-            You remember previous discussions of this project.`,
-          },
-          ...previousMessages,
-        ],
-      });
+    // Load memory
+    const history = await pool.query(
+      `SELECT role, content
+       FROM messages
+       WHERE project = $1 AND deleted = FALSE
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [project]
+    );
 
-      const reply = completion.choices[0].message.content;
+    const previousMessages = history.rows
+      .reverse()
+      .map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
 
-      // Save AI reply
-      await pool.query(
-        "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4)",
-        ["Sensi", reply, project, "assistant"]
-      );
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are Sensi, AI assistant for project ${project}.`,
+        },
+        ...previousMessages,
+      ],
+    });
 
-      // Emit to room
-      io.to(project).emit("chat message", {
-        username: "Sensi",
-        message: reply,
-        project,
-      });
+    const reply = completion.choices[0].message.content;
 
-    } catch (err) {
-      console.error("❌ MESSAGE ERROR:", err);
-    }
-  });
+    io.to(project).emit("stop typing", { project });
 
-  socket.on("disconnect", () => {
-    console.log("❌ User disconnected:", socket.id);
+    const insertAI = await pool.query(
+      "INSERT INTO messages (username, content, project, role) VALUES ($1,$2,$3,$4) RETURNING id",
+      ["Sensi", reply, project, "assistant"]
+    );
+
+    const aiId = insertAI.rows[0].id;
+
+    io.to(project).emit("chat message", {
+      id: aiId,
+      username: "Sensi",
+      message: reply,
+      project,
+    });
   });
 });
 
