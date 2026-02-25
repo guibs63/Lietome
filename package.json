@@ -1,7 +1,7 @@
 {
   "name": "lietome",
   "version": "1.0.0",
-  "description": "Lietome Live multi-project chat",
+  "description": "Sensi Coworking – IA collaborative multi-projets",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
