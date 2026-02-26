@@ -14,13 +14,11 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
 
-// ✅ Chez toi: index.html/client.js/style.css sont à la racine
+// ✅ tes fichiers sont à la racine (index.html, client.js, etc.)
 app.use(express.static(__dirname));
 
-// ✅ Route racine
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
+// ✅ route racine
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
 // --- DB
 if (!process.env.DATABASE_URL) {
@@ -32,13 +30,13 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-// --- Helpers
 function cleanStr(v) {
   return String(v ?? "").trim();
 }
 
-async function ensureTablesAndMigrations() {
-  // projects
+// --- Ensure schema aligned with your DBeaver view:
+// messages: id, username, content, project, role, created_at, deleted
+async function ensureSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS projects (
       id SERIAL PRIMARY KEY,
@@ -47,51 +45,25 @@ async function ensureTablesAndMigrations() {
     );
   `);
 
-  // messages (schéma actuel attendu)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
-      project TEXT NOT NULL,
       username TEXT NOT NULL,
-      message TEXT NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      content TEXT NOT NULL,
+      project TEXT NOT NULL,
+      role TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      deleted BOOLEAN DEFAULT FALSE
     );
   `);
 
-  // ✅ MIGRATION AUTO : si ancienne colonne "content" existe, on la renomme en "message"
-  // (utile si la table existait déjà avant)
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name='messages' AND column_name='content'
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name='messages' AND column_name='message'
-      ) THEN
-        ALTER TABLE messages RENAME COLUMN content TO message;
-      END IF;
-    END $$;
-  `);
-
-  // ✅ Si message n'existe toujours pas (schéma bizarre), on l'ajoute
-  await pool.query(`
-    ALTER TABLE messages
-    ADD COLUMN IF NOT EXISTS message TEXT;
-  `);
-
-  // ✅ Si created_at n'existe pas (ancienne version), on l'ajoute
-  await pool.query(`
-    ALTER TABLE messages
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-  `);
+  // "soft migrations" (safe even if columns already exist)
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS content TEXT;`).catch(() => {});
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS role TEXT;`).catch(() => {});
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`).catch(() => {});
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE;`).catch(() => {});
 }
-
-ensureTablesAndMigrations().catch((e) =>
-  console.error("ensureTablesAndMigrations error:", e)
-);
+ensureSchema().catch((e) => console.error("ensureSchema error:", e));
 
 // --- HEALTH
 app.get("/health", (req, res) => {
@@ -102,8 +74,8 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ---- REST Handlers
-async function getProjects(req, res) {
+// --- REST: projects
+app.get("/projects", async (req, res) => {
   try {
     const r = await pool.query("SELECT name FROM projects ORDER BY created_at DESC");
     res.json(r.rows.map((x) => x.name));
@@ -111,30 +83,31 @@ async function getProjects(req, res) {
     console.error(e);
     res.status(500).json({ error: "Failed to load projects" });
   }
-}
+});
 
-async function createProject(req, res) {
+app.post("/projects", async (req, res) => {
   try {
-    const clean = cleanStr(req.body?.name);
-    if (!clean) return res.status(400).json({ error: "Project name required" });
+    const name = cleanStr(req.body?.name);
+    if (!name) return res.status(400).json({ error: "Project name required" });
 
     await pool.query(
       "INSERT INTO projects(name) VALUES($1) ON CONFLICT (name) DO NOTHING",
-      [clean]
+      [name]
     );
     res.json({ success: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to create project" });
   }
-}
+});
 
-async function deleteProject(req, res) {
+app.delete("/projects/:name", async (req, res) => {
   try {
     const name = cleanStr(req.params.name);
     if (!name) return res.status(400).json({ error: "Project required" });
 
-    await pool.query("DELETE FROM messages WHERE project = $1", [name]);
+    // soft delete messages (keeps history if needed)
+    await pool.query("UPDATE messages SET deleted = TRUE WHERE project = $1", [name]);
     await pool.query("DELETE FROM projects WHERE name = $1", [name]);
 
     res.json({ success: true });
@@ -142,58 +115,95 @@ async function deleteProject(req, res) {
     console.error(e);
     res.status(500).json({ error: "Failed to delete project" });
   }
-}
+});
 
-async function getMessages(req, res) {
+// --- REST: messages
+app.get("/messages", async (req, res) => {
   try {
     const project = cleanStr(req.query.project);
     if (!project) return res.json([]);
 
     const r = await pool.query(
-      `SELECT id, project, username, message, created_at
+      `SELECT id, project, username, content AS message, role, created_at
        FROM messages
-       WHERE project = $1
+       WHERE project = $1 AND (deleted IS DISTINCT FROM TRUE)
        ORDER BY id ASC`,
       [project]
     );
+
     res.json(r.rows);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to load messages" });
   }
-}
-
-// ---- Routes REST (sans /api)
-app.get("/projects", getProjects);
-app.post("/projects", createProject);
-app.delete("/projects/:name", deleteProject);
-app.get("/messages", getMessages);
-
-// ---- Routes REST (alias /api)
-app.get("/api/projects", getProjects);
-app.post("/api/projects", createProject);
-app.delete("/api/projects/:name", deleteProject);
-app.get("/api/messages", getMessages);
+});
 
 // ---- Socket.io
 const server = http.createServer(app);
-
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST", "DELETE"] },
 });
 
+// Presence: project -> Map(socketId -> username)
+const presence = new Map();
+
+function getProjectUsers(project) {
+  const m = presence.get(project);
+  if (!m) return [];
+  return Array.from(m.values()).filter(Boolean);
+}
+
+function emitPresence(project) {
+  io.to(project).emit("presenceUpdate", { project, users: getProjectUsers(project) });
+}
+
+function emitSystem(project, text) {
+  // not stored in DB: lightweight
+  const id = Date.now() + Math.floor(Math.random() * 1000);
+  io.to(project).emit("systemMessage", { id, project, text });
+}
+
+function removeSocketFromAllPresence(socketId) {
+  for (const [proj, map] of presence.entries()) {
+    if (map.has(socketId)) {
+      const u = map.get(socketId);
+      map.delete(socketId);
+      if (map.size === 0) presence.delete(proj);
+      emitPresence(proj);
+      emitSystem(proj, `👋 ${u || "Un utilisateur"} a quitté ${proj === "__GLOBAL__" ? "Global" : proj}`);
+    }
+  }
+}
+
 io.on("connection", (socket) => {
-  socket.on("joinProject", ({ project }) => {
+  socket.on("joinProject", ({ project, username }) => {
     const p = cleanStr(project);
+    const u = cleanStr(username) || "Anonyme";
     if (!p) return;
 
-    // leave other rooms
+    // leave other rooms (keep socket.id)
     for (const room of socket.rooms) {
       if (room !== socket.id) socket.leave(room);
     }
 
+    // remove from any previous presence
+    for (const [proj, map] of presence.entries()) {
+      if (map.has(socket.id)) {
+        map.delete(socket.id);
+        if (map.size === 0) presence.delete(proj);
+        emitPresence(proj);
+      }
+    }
+
+    // join room
     socket.join(p);
-    socket.emit("joinedProject", { project: p });
+
+    // set presence
+    if (!presence.has(p)) presence.set(p, new Map());
+    presence.get(p).set(socket.id, u);
+
+    emitPresence(p);
+    emitSystem(p, `👋 ${u} a rejoint ${p === "__GLOBAL__" ? "Global" : p}`);
   });
 
   socket.on("chatMessage", async ({ project, username, message }) => {
@@ -203,17 +213,18 @@ io.on("connection", (socket) => {
       const m = cleanStr(message);
       if (!p || !m) return;
 
+      // if user isn't in room (edge case), join it
+      if (!socket.rooms.has(p)) socket.join(p);
+
       const r = await pool.query(
-        `INSERT INTO messages(project, username, message)
-         VALUES ($1, $2, $3)
-         RETURNING id, project, username, message, created_at`,
-        [p, u, m]
+        `INSERT INTO messages(project, username, content, role)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, project, username, content AS message, role, created_at`,
+        [p, u, m, null]
       );
 
-      const saved = r.rows[0];
-
-      // ✅ UNE SEULE EMISSION -> plus de doublon
-      io.to(p).emit("chatMessage", saved);
+      // ✅ single emission to room => no double display
+      io.to(p).emit("chatMessage", r.rows[0]);
     } catch (e) {
       console.error("chatMessage error:", e);
       socket.emit("errorMessage", { error: "Failed to save message" });
@@ -226,27 +237,24 @@ io.on("connection", (socket) => {
       const p = cleanStr(project);
       if (!Number.isFinite(mid) || !p) return;
 
-      await pool.query("DELETE FROM messages WHERE id = $1 AND project = $2", [mid, p]);
-
-      // ✅ broadcast à la room
+      await pool.query("UPDATE messages SET deleted = TRUE WHERE id = $1 AND project = $2", [mid, p]);
       io.to(p).emit("messageDeleted", { id: mid });
     } catch (e) {
       console.error("deleteMessage error:", e);
       socket.emit("errorMessage", { error: "Failed to delete message" });
     }
   });
+
+  socket.on("disconnect", () => {
+    removeSocketFromAllPresence(socket.id);
+  });
 });
 
-// --- 404 JSON (API) + fallback
+// --- 404 JSON for API-ish calls + fallback to index
 app.use((req, res) => {
-  if (
-    req.path.startsWith("/api") ||
-    req.path.startsWith("/messages") ||
-    req.path.startsWith("/projects")
-  ) {
+  if (req.path.startsWith("/projects") || req.path.startsWith("/messages")) {
     return res.status(404).json({ error: "Not found", path: req.url });
   }
-
   return res.sendFile(path.join(__dirname, "index.html"));
 });
 
