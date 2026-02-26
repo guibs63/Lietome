@@ -49,6 +49,64 @@
     #message { flex:1; min-width: 240px; }
     .status { display:flex; align-items:center; gap:8px; }
     .dot { width:10px; height:10px; border-radius:999px; background:#18a558; display:inline-block; }
+
+    /* === NEW: petits boutons icônes === */
+    .iconbtn{
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:6px;
+      padding: 8px 10px;
+      cursor:pointer;
+      line-height:1;
+    }
+    .iconbtn:hover{ filter:brightness(0.98); }
+    .iconbtn:disabled{ opacity:.5; cursor:not-allowed; }
+    .mic-on{ outline: 2px solid rgba(24,165,88,.35); }
+
+    /* === NEW: visualiseur === */
+    .audioviz{ width:100%; margin-top:10px; display:grid; gap:6px; }
+    #viz{ width:100%; height:60px; border:1px solid #eee; border-radius:10px; background:#fafafa; }
+    .viz-label{ font-size:12px; color:#666; }
+
+    /* === NEW: modal connectés === */
+    .hidden{ display:none !important; }
+    .modal{ position:fixed; inset:0; z-index:999; display:grid; place-items:center; }
+    .modal-backdrop{ position:absolute; inset:0; background:rgba(0,0,0,.35); }
+    .modal-card{
+      position:relative;
+      width:min(520px, calc(100vw - 24px));
+      max-height:min(70vh, 720px);
+      overflow:hidden;
+      border-radius:12px;
+      border:1px solid #ddd;
+      background:#fff;
+      z-index:1000;
+      box-shadow: 0 12px 30px rgba(0,0,0,.2);
+    }
+    .modal-head{
+      display:flex; justify-content:space-between; align-items:center;
+      padding:12px 12px;
+      border-bottom:1px solid #eee;
+    }
+    .modal-title{ font-weight:700; }
+    .modal-close{
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:8px;
+      padding:6px 10px;
+      cursor:pointer;
+    }
+    .modal-body{ padding:12px; }
+    .presence-project{ font-size:12px; color:#666; margin-bottom:6px; }
+    .presence-count{ font-size:12px; color:#666; margin-bottom:10px; }
+    .presence-list{ display:grid; gap:8px; }
+    .presence-user{
+      padding:10px 12px;
+      border:1px solid #eee;
+      border-radius:10px;
+      background:#fafafa;
+    }
+    .presence-empty{ font-size:12px; color:#666; padding:10px; }
   </style>
 </head>
 
@@ -74,6 +132,9 @@
 
         <button id="join">Rejoindre</button>
 
+        <!-- ✅ NEW: fenêtre connectés -->
+        <button id="presence-open" class="iconbtn" type="button" title="Voir qui est connecté">👥</button>
+
         <div style="flex:1"></div>
         <div class="hint">Astuce : change de projet → historique chargé automatiquement</div>
       </div>
@@ -97,10 +158,50 @@
 
       <!-- Form message -->
       <form id="chat-form" class="row form-row">
+        <!-- ✅ NEW: upload + micro -->
+        <button id="attach" class="iconbtn" type="button" title="Ajouter un fichier">＋</button>
+        <button id="mic" class="iconbtn" type="button" title="Dictée vocale (dit 'over' pour envoyer)">🎤</button>
+
         <input id="message" placeholder="Écris un message..." autocomplete="off" />
         <button type="submit">Envoyer</button>
+
+        <!-- ✅ NEW: input file caché -->
+        <input
+          id="file"
+          type="file"
+          style="display:none"
+          accept=".txt,.md,.pdf,.docx,.xlsx,.csv,.json,image/*,audio/*"
+        />
       </form>
+
+      <!-- ✅ NEW: visualiseur -->
+      <div class="audioviz">
+        <canvas id="viz" width="900" height="60"></canvas>
+        <div id="viz-label" class="viz-label">Micro: prêt</div>
+      </div>
+
+      <!-- ✅ (optionnel) zone fichiers si ton client.js gère /files -->
+      <div style="margin-top:14px;">
+        <div class="hint" style="margin-bottom:6px;">Fichiers du projet</div>
+        <div id="files"></div>
+      </div>
     </div>
+  </div>
+
+  <!-- ✅ Modal présence -->
+  <div id="presence-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div class="modal-title">Connectés au projet</div>
+        <button id="presence-close" class="modal-close" title="Fermer">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="presence-project" class="presence-project"></div>
+        <div id="presence-count" class="presence-count"></div>
+        <div id="presence-list" class="presence-list"></div>
+      </div>
+    </div>
+    <div id="presence-backdrop" class="modal-backdrop"></div>
   </div>
 
   <!-- IMPORTANT : client.js est à la racine -->
