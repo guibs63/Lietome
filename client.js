@@ -5,6 +5,7 @@ const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
 const usernameInput = document.getElementById("username");
 const projectSelect = document.getElementById("project");
+const joinBtn = document.getElementById("join-btn");
 
 let currentProject = null;
 let typingIndicator = null;
@@ -25,6 +26,12 @@ async function loadProjects() {
     option.textContent = p.name;
     projectSelect.appendChild(option);
   });
+
+  // 🔥 Auto-select first project
+  if (projects.length > 0) {
+    currentProject = projects[0].name;
+    socket.emit("join project", { project: currentProject });
+  }
 }
 
 loadProjects();
@@ -63,11 +70,21 @@ chat.addEventListener("click", async (e) => {
 // JOIN PROJECT
 // =======================
 
+// When dropdown changes
 projectSelect.addEventListener("change", () => {
   currentProject = projectSelect.value;
   chat.innerHTML = "";
   socket.emit("join project", { project: currentProject });
 });
+
+// 🔥 When clicking "Rejoindre"
+if (joinBtn) {
+  joinBtn.addEventListener("click", () => {
+    currentProject = projectSelect.value;
+    chat.innerHTML = "";
+    socket.emit("join project", { project: currentProject });
+  });
+}
 
 // =======================
 // SEND MESSAGE
@@ -96,7 +113,13 @@ form.addEventListener("submit", (e) => {
 
 socket.on("chat message", (data) => {
   if (data.project !== currentProject) return;
-  addMessage(data.id, data.username, data.message, data.username === "Sensi" ? "assistant" : "user");
+
+  addMessage(
+    data.id,
+    data.username,
+    data.message,
+    data.username === "Sensi" ? "assistant" : "user"
+  );
 });
 
 // =======================
