@@ -1,5 +1,5 @@
 // guibs:/client.js
-window.__SENSI_CLIENT_LOADED__ = "projects-ui-fix-v1";
+window.__SENSI_CLIENT_LOADED__ = "projects-ui-fix-v2-dedupe";
 
 const socket = io();
 let currentProject = null;
@@ -15,6 +15,9 @@ const createProjectBtn = document.getElementById("create-project");
 const deleteProjectBtn = document.getElementById("delete-project");
 const joinBtn = document.getElementById("join");
 
+// ✅ anti-doublons (id DB)
+const seenMessageIds = new Set();
+
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -26,15 +29,16 @@ function escapeHtml(s) {
 
 function clearChat() {
   chat.innerHTML = "";
+  seenMessageIds.clear();
 }
 
 function normalizeProjects(payload) {
-  // ton endpoint renvoie : [{name:"test"}, {name:"Evercell"}]
-  if (!Array.isArray(payload)) return [];
-  if (payload.length === 0) return [];
-  if (typeof payload[0] === "string") return payload;
+  // endpoint peut renvoyer: ["test"] OU [{name:"test"}]
+  if (!Array.isArray(payload) || payload.length === 0) return [];
+  if (typeof payload[0] === "string") return payload.map(String).filter(Boolean);
+
   if (typeof payload[0] === "object" && payload[0] && "name" in payload[0]) {
-    return payload.map(p => String(p.name)).filter(Boolean);
+    return payload.map((p) => String(p.name)).filter(Boolean);
   }
   return [];
 }
@@ -64,7 +68,23 @@ async function fetchJson(url, options) {
   return res.json();
 }
 
-function addMessageRow({ id, username, message }) {
+function normalizeMessagePayload(m) {
+  // support "message" (nouveau) + "content" (ancien schéma)
+  const id = m?.id;
+  const username = m?.username ?? "Anonyme";
+  const message = m?.message ?? m?.content ?? "";
+  const project = m?.project ?? "";
+  return { id, username, message, project };
+}
+
+function addMessageRow(raw) {
+  const { id, username, message } = normalizeMessagePayload(raw);
+  if (!id) return;
+
+  // ✅ déduplication
+  if (seenMessageIds.has(id)) return;
+  seenMessageIds.add(id);
+
   const row = document.createElement("div");
   row.className = "msg";
   row.dataset.id = id;
@@ -101,13 +121,23 @@ async function loadHistory(project) {
   if (!project) return;
   clearChat();
 
-  const messages = await fetchJson(`/messages?project=${encodeURIComponent(project)}`);
+  const messages = await fetchJson(
+    `/messages?project=${encodeURIComponent(project)}`
+  );
+
   for (const m of messages) addMessageRow(m);
 }
 
 async function joinProject(project) {
   const p = String(project || "").trim();
   if (!p) return;
+
+  // évite de recharger si on rejoint le même projet (optionnel)
+  // si tu veux recharger quand même, commente ce bloc
+  if (currentProject === p && seenMessageIds.size > 0) {
+    socket.emit("joinProject", { project: p });
+    return;
+  }
 
   currentProject = p;
   socket.emit("joinProject", { project: p });
@@ -160,11 +190,15 @@ form?.addEventListener("submit", (e) => {
   input.value = "";
 });
 
-socket.on("chatMessage", (msg) => {
+socket.on("chatMessage", (raw) => {
+  const msg = normalizeMessagePayload(raw);
   if (msg.project === currentProject) addMessageRow(msg);
 });
 
 socket.on("messageDeleted", ({ id }) => {
+  if (!id) return;
+  seenMessageIds.delete(id);
+
   const row = chat.querySelector(`.msg[data-id="${id}"]`);
   if (row) row.remove();
 });
@@ -173,12 +207,22 @@ socket.on("errorMessage", ({ error }) => {
   console.warn("[Sensi] server error:", error);
 });
 
+socket.on("connect", () => {
+  console.log("[Sensi] socket connected:", socket.id);
+  // optionnel: rejoin project on reconnect
+  if (currentProject) socket.emit("joinProject", { project: currentProject });
+});
+
+socket.on("disconnect", (reason) => {
+  console.warn("[Sensi] socket disconnected:", reason);
+});
+
 (async function init() {
-  // garde-fou: si les IDs n’existent pas, on le voit tout de suite
   if (!projectSelect) {
     console.error("[Sensi] #project not found in DOM");
     return;
   }
+
   await loadProjects();
   await joinProject(projectSelect.value);
 })();

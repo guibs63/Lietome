@@ -7,7 +7,6 @@ const http = require("http");
 const path = require("path");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
-// const OpenAI = require("openai"); // garde seulement si tu l'utilises
 
 const app = express();
 app.set("trust proxy", 1);
@@ -15,11 +14,10 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
 
-// ✅ IMPORTANT : chez toi, index.html/client.js/style.css sont à la racine
-// donc on sert les fichiers statiques depuis __dirname
+// ✅ Chez toi: index.html/client.js/style.css sont à la racine
 app.use(express.static(__dirname));
 
-// ✅ Route racine (évite le 404 sur "/")
+// ✅ Route racine
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
@@ -34,9 +32,13 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-// const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); // optionnel
+// --- Helpers
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
 
-async function ensureTables() {
+async function ensureTablesAndMigrations() {
+  // projects
   await pool.query(`
     CREATE TABLE IF NOT EXISTS projects (
       id SERIAL PRIMARY KEY,
@@ -45,6 +47,7 @@ async function ensureTables() {
     );
   `);
 
+  // messages (schéma actuel attendu)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
@@ -54,8 +57,41 @@ async function ensureTables() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+
+  // ✅ MIGRATION AUTO : si ancienne colonne "content" existe, on la renomme en "message"
+  // (utile si la table existait déjà avant)
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='messages' AND column_name='content'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='messages' AND column_name='message'
+      ) THEN
+        ALTER TABLE messages RENAME COLUMN content TO message;
+      END IF;
+    END $$;
+  `);
+
+  // ✅ Si message n'existe toujours pas (schéma bizarre), on l'ajoute
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS message TEXT;
+  `);
+
+  // ✅ Si created_at n'existe pas (ancienne version), on l'ajoute
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+  `);
 }
-ensureTables().catch((e) => console.error("ensureTables error:", e));
+
+ensureTablesAndMigrations().catch((e) =>
+  console.error("ensureTablesAndMigrations error:", e)
+);
 
 // --- HEALTH
 app.get("/health", (req, res) => {
@@ -66,12 +102,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-// --- Helpers
-function cleanStr(v) {
-  return String(v ?? "").trim();
-}
-
-// ---- Handlers REST
+// ---- REST Handlers
 async function getProjects(req, res) {
   try {
     const r = await pool.query("SELECT name FROM projects ORDER BY created_at DESC");
@@ -136,14 +167,12 @@ async function getMessages(req, res) {
 app.get("/projects", getProjects);
 app.post("/projects", createProject);
 app.delete("/projects/:name", deleteProject);
-
 app.get("/messages", getMessages);
 
 // ---- Routes REST (alias /api)
 app.get("/api/projects", getProjects);
 app.post("/api/projects", createProject);
 app.delete("/api/projects/:name", deleteProject);
-
 app.get("/api/messages", getMessages);
 
 // ---- Socket.io
@@ -158,6 +187,7 @@ io.on("connection", (socket) => {
     const p = cleanStr(project);
     if (!p) return;
 
+    // leave other rooms
     for (const room of socket.rooms) {
       if (room !== socket.id) socket.leave(room);
     }
@@ -182,8 +212,8 @@ io.on("connection", (socket) => {
 
       const saved = r.rows[0];
 
+      // ✅ UNE SEULE EMISSION -> plus de doublon
       io.to(p).emit("chatMessage", saved);
-      socket.emit("chatMessage", saved);
     } catch (e) {
       console.error("chatMessage error:", e);
       socket.emit("errorMessage", { error: "Failed to save message" });
@@ -197,8 +227,9 @@ io.on("connection", (socket) => {
       if (!Number.isFinite(mid) || !p) return;
 
       await pool.query("DELETE FROM messages WHERE id = $1 AND project = $2", [mid, p]);
+
+      // ✅ broadcast à la room
       io.to(p).emit("messageDeleted", { id: mid });
-      socket.emit("messageDeleted", { id: mid });
     } catch (e) {
       console.error("deleteMessage error:", e);
       socket.emit("errorMessage", { error: "Failed to delete message" });
@@ -208,12 +239,14 @@ io.on("connection", (socket) => {
 
 // --- 404 JSON (API) + fallback
 app.use((req, res) => {
-  // si c’est une route API, renvoie JSON
-  if (req.path.startsWith("/api") || req.path.startsWith("/messages") || req.path.startsWith("/projects")) {
+  if (
+    req.path.startsWith("/api") ||
+    req.path.startsWith("/messages") ||
+    req.path.startsWith("/projects")
+  ) {
     return res.status(404).json({ error: "Not found", path: req.url });
   }
 
-  // sinon, tente de renvoyer l'index (utile si tu navigues côté client)
   return res.sendFile(path.join(__dirname, "index.html"));
 });
 
