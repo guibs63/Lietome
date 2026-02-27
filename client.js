@@ -1,15 +1,22 @@
-// guibs:/client.js (COMPLET) — ULTRA v2
-// ✅ gère /projects en {ok:true, projects:[...]} OU en [...]
-// ✅ évite double chargement (fetch + socket)
-// ✅ option: auto-join (flag AUTO_JOIN)
-// ✅ UX upload + sécurité (pseudo/projet requis)
+// guibs:/client.js (COMPLET) — ULTRA v2 (Railway-safe + no-cache server-side)
+//
+// ✅ Socket: websocket + polling fallback (prod safe)
+// ✅ /projects: {ok:true, projects:[...]} OU [...]
+// ✅ Pas besoin de version bump (?v=) si tu mets Cache-Control:no-store sur /client.js côté server
+// ✅ Upload + delete message author-only + presence
 
-const socket = io(window.location.origin, { transports: ["websocket"] });
+const socket = io(window.location.origin, {
+  transports: ["websocket", "polling"],
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 600,
+  timeout: 20000,
+});
 
 /** =========================
  *  FLAGS
  *  ========================= */
-const AUTO_JOIN = false; // <- mets true si tu veux auto-join dès que pseudo + projet dispo
+const AUTO_JOIN = false; // mets true si tu veux auto-join dès que pseudo + projet dispo
 
 /** =========================
  *  STATE
@@ -49,6 +56,24 @@ const deleteProjectBtn = document.getElementById("delete-project-btn");
 const usersList = document.getElementById("users");
 const usersCount = document.getElementById("users-count");
 const currentProjectLabel = document.getElementById("current-project-label");
+
+// Sécurité si HTML change
+(function assertDom() {
+  const required = [
+    ["chat", chat],
+    ["chat-form", form],
+    ["message", input],
+    ["username", usernameInput],
+    ["project", projectSelect],
+    ["join-btn", joinBtn],
+  ];
+  const missing = required.filter(([, el]) => !el).map(([id]) => id);
+  if (missing.length) {
+    console.error("DOM missing:", missing);
+    alert("Erreur UI: éléments manquants dans index.html : " + missing.join(", "));
+    throw new Error("UI DOM missing");
+  }
+})();
 
 /** =========================
  *  UTILS
@@ -112,6 +137,7 @@ function restoreLastSession() {
 }
 
 function setProjectLabel(p) {
+  if (!currentProjectLabel) return;
   currentProjectLabel.textContent = p || "—";
 }
 
@@ -154,7 +180,6 @@ function renderAttachment(att) {
   const url = escapeHtml(att.url);
   const isImg = String(att.mimetype || "").startsWith("image/");
 
-  // fichiers générés /generated ou uploads /uploads = identique côté UI
   if (isImg) {
     return `
       <div style="margin-top:6px;">
@@ -227,8 +252,10 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
 
 function renderUsers(users) {
   const arr = Array.isArray(users) ? users : [];
-  usersList.innerHTML = "";
-  usersCount.textContent = String(arr.length);
+  if (usersList) usersList.innerHTML = "";
+  if (usersCount) usersCount.textContent = String(arr.length);
+
+  if (!usersList) return;
 
   if (arr.length === 0) {
     const li = document.createElement("li");
@@ -303,29 +330,33 @@ usernameInput.addEventListener("keydown", (e) => {
 /** =========================
  *  PROJECTS CRUD
  *  ========================= */
-createProjectBtn.addEventListener("click", () => {
-  const name = cleanStr(newProjectInput.value);
-  if (!name) return;
-  socket.emit("createProject", { name });
-  newProjectInput.value = "";
-});
-
-newProjectInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
+if (createProjectBtn && newProjectInput) {
+  createProjectBtn.addEventListener("click", () => {
     const name = cleanStr(newProjectInput.value);
     if (!name) return;
     socket.emit("createProject", { name });
     newProjectInput.value = "";
-  }
-});
+  });
 
-deleteProjectBtn.addEventListener("click", () => {
-  const p = cleanStr(projectSelect.value);
-  if (!p) return;
-  const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
-  if (!ok) return;
-  socket.emit("deleteProject", { project: p });
-});
+  newProjectInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const name = cleanStr(newProjectInput.value);
+      if (!name) return;
+      socket.emit("createProject", { name });
+      newProjectInput.value = "";
+    }
+  });
+}
+
+if (deleteProjectBtn) {
+  deleteProjectBtn.addEventListener("click", () => {
+    const p = cleanStr(projectSelect.value);
+    if (!p) return;
+    const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
+    if (!ok) return;
+    socket.emit("deleteProject", { project: p });
+  });
+}
 
 /** =========================
  *  UPLOAD
@@ -362,22 +393,21 @@ form.addEventListener("submit", async (e) => {
 
   try {
     if (file) {
-      uploadState.textContent = `Upload "${file.name}"...`;
+      if (uploadState) uploadState.textContent = `Upload "${file.name}"...`;
       if (submitBtn) submitBtn.disabled = true;
 
       await uploadFile(file);
 
-      uploadState.textContent = "Upload OK ✅ (analyse Sensi en cours…)";
-      fileInput.value = "";
+      if (uploadState) uploadState.textContent = "Upload OK ✅ (analyse Sensi en cours…)";
+      if (fileInput) fileInput.value = "";
       input.value = "";
       input.focus();
-      setTimeout(() => { uploadState.textContent = ""; }, 2500);
+      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2500);
       return;
     }
 
     if (!message) return;
 
-    // garde currentUsername à jour
     currentUsername = username;
     saveLastSession();
 
@@ -392,8 +422,8 @@ form.addEventListener("submit", async (e) => {
     input.focus();
   } catch (err) {
     console.error(err);
-    alert(`Erreur: ${err.message}`);
-    uploadState.textContent = "";
+    alert(`Erreur: ${err?.message || err}`);
+    if (uploadState) uploadState.textContent = "";
   } finally {
     if (submitBtn) submitBtn.disabled = false;
   }
@@ -461,7 +491,6 @@ socket.on("projectsUpdate", (payload) => {
   const list = Array.isArray(payload?.projects) ? payload.projects : [];
   setProjectsOptions(list, true);
 
-  // restore last project if possible
   const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
   if (want && list.includes(want)) projectSelect.value = want;
 
@@ -497,7 +526,7 @@ async function loadProjectsOnce() {
   if (projectsLoadedOnce) return;
   projectsLoadedOnce = true;
 
-  // 1) HTTP first (ton /projects => {ok:true, projects:[...]} ou [...])
+  // 1) HTTP first (/projects => {ok:true, projects:[...]} ou [...])
   try {
     const res = await fetch("/projects");
     const data = await res.json().catch(() => ({}));
@@ -510,7 +539,6 @@ async function loadProjectsOnce() {
     if (list.length > 0) {
       setProjectsOptions(list, true);
 
-      // restore last project
       const want = cleanStr(last?.p);
       if (want && list.includes(want)) projectSelect.value = want;
 

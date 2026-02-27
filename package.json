@@ -6,15 +6,23 @@
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "cors": "^2.8.5",
+    "docx": "^9.5.0",
     "dotenv": "^17.3.1",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
+    "jsdom": "^26.1.0",
     "mammoth": "^1.11.0",
     "multer": "^2.0.2",
     "openai": "^6.25.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.18.0",
+    "pptxgenjs": "^3.13.0",
     "socket.io": "^4.8.3",
     "sqlite3": "^5.1.7",
     "textract": "^2.5.0",
