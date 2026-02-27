@@ -27,6 +27,35 @@
     }
 
     .msg{ margin-bottom:8px; line-height:1.35; word-break:break-word; }
+    .msg .time{ color:#666; margin-right:6px; font-size:12px; }<!-- guibs:/index.html (COMPLET) -->
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sensi - travail collaboratif 🚀</title>
+  <style>
+    body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
+    h1{ margin-bottom: 10px; }
+
+    input, select, button{ padding:8px; font-size:14px; }
+    button{ cursor:pointer; }
+
+    .topbar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+    .hint{ color:#666; font-size:12px; margin:6px 0 12px; }
+
+    .layout{ display:grid; grid-template-columns:1fr 260px; gap:12px; align-items:start; }
+    @media (max-width: 900px){ .layout{ grid-template-columns:1fr; } }
+
+    #chat{
+      border:1px solid #ccc;
+      height:460px;
+      overflow-y:auto;
+      padding:10px;
+      background:#fff;
+    }
+
+    .msg{ margin-bottom:8px; line-height:1.35; word-break:break-word; }
     .msg .time{ color:#666; margin-right:6px; font-size:12px; }
     .msg.system{ color:#444; opacity:0.9; }
 
@@ -35,8 +64,13 @@
       gap:8px;
       align-items:center;
       margin-top:12px;
+      flex-wrap:wrap;
     }
+
     #message{ flex:1; min-width:220px; }
+    #file{ max-width:340px; }
+
+    .upload-state{ font-size:12px; color:#666; }
 
     .panel{ border:1px solid #ccc; background:#fff; padding:10px; }
     .panel h3{ margin:0 0 8px 0; font-size:15px; }
@@ -75,10 +109,7 @@
       align-items:flex-start;
     }
     .msg-main{ flex:1; }
-    .msg-actions{
-      position:relative;
-      flex:0 0 auto;
-    }
+    .msg-actions{ position:relative; flex:0 0 auto; }
     .kebab{
       padding:2px 8px;
       border:1px solid #ddd;
@@ -128,8 +159,7 @@
   </div>
 
   <div class="hint">
-    Projets synchronisés en temps réel (création/suppression). Messages persistants par projet + users en ligne.
-    Menu ⋮ sur tes messages pour supprimer.
+    Chat + présence + projets temps réel. Upload fichiers (images/docs) → analyse automatique par Sensi (avec web si nécessaire).
   </div>
 
   <div class="layout">
@@ -139,7 +169,9 @@
 
       <form id="chat-form" autocomplete="off">
         <input type="text" id="message" placeholder="Message..." autocomplete="off" />
+        <input type="file" id="file" />
         <button type="submit">Envoyer</button>
+        <span class="upload-state" id="upload-state"></span>
       </form>
     </div>
 
@@ -153,10 +185,145 @@
     </aside>
   </div>
 
-  <!-- Socket.IO -->
+  <!-- Socket.IO servi par express -->
   <script src="/socket.io/socket.io.js"></script>
 
-  <!-- Client (cache-buster) -->
-  <script src="/client.js?v=author-delete-v1"></script>
+  <!-- Client -->
+  <script src="/client.js?v=auto-web-v1"></script>
+</body>
+</html>
+    .msg.system{ color:#444; opacity:0.9; }
+
+    form#chat-form{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      margin-top:12px;
+      flex-wrap:wrap;
+    }
+
+    #message{ flex:1; min-width:220px; }
+    #file{ max-width:340px; }
+
+    .upload-state{ font-size:12px; color:#666; }
+
+    .panel{ border:1px solid #ccc; background:#fff; padding:10px; }
+    .panel h3{ margin:0 0 8px 0; font-size:15px; }
+    .badge{
+      display:inline-block;
+      padding:2px 8px;
+      border:1px solid #ddd;
+      border-radius:999px;
+      font-size:12px;
+      color:#444;
+      margin-left:6px;
+    }
+
+    #users{ list-style:none; padding:0; margin:0; }
+    #users li{
+      padding:6px 8px;
+      border-bottom:1px solid #f0f0f0;
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+      align-items:center;
+    }
+    #users li:last-child{ border-bottom:none; }
+
+    .dot{ width:8px; height:8px; border-radius:50%; background:#22c55e; display:inline-block; margin-right:8px; }
+    .userline{ display:flex; align-items:center; gap:6px; min-width:0; }
+    .uname{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; display:inline-block; }
+
+    .danger{ border:1px solid #f2b8b5; background:#fff5f5; }
+
+    /* ===== Menu ⋮ messages ===== */
+    .msg-row{
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      align-items:flex-start;
+    }
+    .msg-main{ flex:1; }
+    .msg-actions{ position:relative; flex:0 0 auto; }
+    .kebab{
+      padding:2px 8px;
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:6px;
+      line-height:1;
+    }
+    .menu{
+      position:absolute;
+      right:0;
+      top:28px;
+      min-width:160px;
+      background:#fff;
+      border:1px solid #ddd;
+      border-radius:10px;
+      box-shadow:0 10px 30px rgba(0,0,0,.08);
+      padding:6px;
+      z-index:50;
+    }
+    .menu-item{
+      width:100%;
+      text-align:left;
+      padding:8px 10px;
+      background:#fff;
+      border:0;
+      border-radius:8px;
+    }
+    .menu-item:hover{ background:#f3f4f6; }
+  </style>
+</head>
+
+<body>
+  <h1>Sensi - travail collaboratif 🚀</h1>
+
+  <!-- JOIN -->
+  <div class="topbar">
+    <input type="text" id="username" placeholder="Pseudo" autocomplete="nickname" />
+    <select id="project"></select>
+    <button id="join-btn" type="button">Rejoindre</button>
+  </div>
+
+  <!-- PROJECTS CRUD -->
+  <div class="topbar">
+    <input type="text" id="new-project" placeholder="Nouveau projet (ex: EverCell)" />
+    <button id="create-project-btn" type="button">+ Créer</button>
+    <button id="delete-project-btn" type="button" class="danger">🗑️ Supprimer ce projet</button>
+  </div>
+
+  <div class="hint">
+    Chat + présence + projets temps réel. Upload fichiers (images/docs) → analyse automatique par Sensi.
+  </div>
+
+  <div class="layout">
+    <!-- CHAT -->
+    <div>
+      <div id="chat" aria-live="polite"></div>
+
+      <form id="chat-form" autocomplete="off">
+        <input type="text" id="message" placeholder="Message..." autocomplete="off" />
+        <input type="file" id="file" />
+        <button type="submit">Envoyer</button>
+        <span class="upload-state" id="upload-state"></span>
+      </form>
+    </div>
+
+    <!-- USERS ONLINE -->
+    <aside class="panel">
+      <h3>Users en ligne <span class="badge" id="users-count">0</span></h3>
+      <div class="hint" style="margin:0 0 8px;">
+        Projet : <strong id="current-project-label">—</strong>
+      </div>
+      <ul id="users"></ul>
+    </aside>
+  </div>
+
+  <!-- Socket.IO (servi par express) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- Client -->
+  <script src="/client.js?v=upload-ai-v1"></script>
 </body>
 </html>
