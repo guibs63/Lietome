@@ -1,4 +1,4 @@
-<!-- guibs:/index.html (COMPLET) — adapté + clean (doublon supprimé) -->
+<!-- guibs:/index.html (COMPLET) — adapté + clean + cohérent avec client.js (session restore + version bump) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -160,6 +160,7 @@
   <script src="/socket.io/socket.io.js"></script>
 
   <!-- Client -->
-  <script src="/client.js?v=auto-web-v1"></script>
+  <!-- bump la version pour forcer le cache à se vider -->
+  <script src="/client.js?v=auto-web-v2"></script>
 </body>
 </html>

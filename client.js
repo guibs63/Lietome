@@ -1,5 +1,7 @@
-// guibs:/client.js (COMPLET) — adapté (robustesse + compat /projects + UX)
+// guibs:/client.js (COMPLET) — adapté (robustesse + compat /projects + UX + auto-join optionnel)
 // ✅ gère /projects en {ok:true, projects:[...]} OU en [...]
+// ✅ évite double chargement (fetch + socket) + garde un fallback
+// ✅ option: auto-join si pseudo déjà saisi + projet dispo
 const socket = io(window.location.origin, { transports: ["websocket"] });
 
 let currentProject = null;
@@ -9,6 +11,8 @@ const seenMessageIds = new Set();
 const messageNodes = new Map();
 
 const LS_USER_ID = "sensi_user_id";
+const LS_LAST_USERNAME = "sensi_last_username";
+const LS_LAST_PROJECT = "sensi_last_project";
 const myUserId = getOrCreateUserId();
 
 const chat = document.getElementById("chat");
@@ -31,6 +35,7 @@ const currentProjectLabel = document.getElementById("current-project-label");
 
 /* utils */
 function cleanStr(v) { return String(v ?? "").trim(); }
+
 function escapeHtml(str) {
   return String(str ?? "")
     .replaceAll("&", "&amp;")
@@ -39,6 +44,7 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
 function formatTime(ts) {
   try {
     if (!ts) return "";
@@ -46,15 +52,37 @@ function formatTime(ts) {
     return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
   } catch { return ""; }
 }
+
 function getOrCreateUserId() {
   try {
     const existing = localStorage.getItem(LS_USER_ID);
     if (existing && existing.length >= 8) return existing;
-    const uid = (crypto?.randomUUID ? crypto.randomUUID() : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+    const uid = (crypto?.randomUUID
+      ? crypto.randomUUID()
+      : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`
+    );
     localStorage.setItem(LS_USER_ID, uid);
     return uid;
   } catch {
     return `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+}
+
+function saveLastSession() {
+  try {
+    if (currentUsername) localStorage.setItem(LS_LAST_USERNAME, currentUsername);
+    if (currentProject) localStorage.setItem(LS_LAST_PROJECT, currentProject);
+  } catch {}
+}
+
+function restoreLastSession() {
+  try {
+    const u = cleanStr(localStorage.getItem(LS_LAST_USERNAME));
+    const p = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+    if (u && !cleanStr(usernameInput.value)) usernameInput.value = u;
+    return { u, p };
+  } catch {
+    return { u: "", p: "" };
   }
 }
 
@@ -64,6 +92,7 @@ function clearChat() {
   seenMessageIds.clear();
   messageNodes.clear();
 }
+
 function addSystem(text) {
   const div = document.createElement("div");
   div.className = "msg system";
@@ -71,6 +100,7 @@ function addSystem(text) {
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
+
 function closeAllMenus() {
   document.querySelectorAll(".menu").forEach((m) => m.setAttribute("hidden", ""));
 }
@@ -90,6 +120,7 @@ function renderAttachment(att) {
   const name = escapeHtml(att.filename || "fichier");
   const url = escapeHtml(att.url);
   const isImg = String(att.mimetype || "").startsWith("image/");
+
   if (isImg) {
     return `
       <div style="margin-top:6px;">
@@ -188,16 +219,21 @@ function setProjectLabel(p) { currentProjectLabel.textContent = p || "—"; }
 function setProjectsOptions(projects, keepSelection = true) {
   const prev = keepSelection ? cleanStr(projectSelect.value) : "";
   projectSelect.innerHTML = "";
-  for (const p of projects) {
+
+  for (const p of (projects || [])) {
+    const name = cleanStr(p);
+    if (!name) continue;
     const opt = document.createElement("option");
-    opt.value = p;
-    opt.textContent = p;
+    opt.value = name;
+    opt.textContent = name;
     projectSelect.appendChild(opt);
   }
+
   if (keepSelection && prev) {
     const exists = Array.from(projectSelect.options).some((o) => o.value === prev);
     if (exists) projectSelect.value = prev;
   }
+
   if (!projectSelect.value && projectSelect.options.length > 0) {
     projectSelect.value = projectSelect.options[0].value;
   }
@@ -207,11 +243,13 @@ function setProjectsOptions(projects, keepSelection = true) {
 function joinProject() {
   const username = cleanStr(usernameInput.value);
   const project = cleanStr(projectSelect.value);
+
   if (!username) return alert("Entre un pseudo 🙂");
   if (!project) return alert("Aucun projet disponible.");
 
   currentUsername = username;
   currentProject = project;
+  saveLastSession();
 
   setProjectLabel(currentProject);
   clearChat();
@@ -220,6 +258,7 @@ function joinProject() {
 
   socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
 }
+
 joinBtn.addEventListener("click", joinProject);
 usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
 
@@ -230,6 +269,7 @@ createProjectBtn.addEventListener("click", () => {
   socket.emit("createProject", { name });
   newProjectInput.value = "";
 });
+
 newProjectInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     const name = cleanStr(newProjectInput.value);
@@ -238,6 +278,7 @@ newProjectInput.addEventListener("keydown", (e) => {
     newProjectInput.value = "";
   }
 });
+
 deleteProjectBtn.addEventListener("click", () => {
   const p = cleanStr(projectSelect.value);
   if (!p) return;
@@ -272,12 +313,15 @@ form.addEventListener("submit", async (e) => {
   const message = cleanStr(input.value);
   const file = fileInput?.files?.[0];
 
+  const submitBtn = form.querySelector("button[type=submit]");
+
   try {
-    const submitBtn = form.querySelector("button[type=submit]");
     if (file) {
       uploadState.textContent = `Upload "${file.name}"...`;
       if (submitBtn) submitBtn.disabled = true;
+
       await uploadFile(file);
+
       uploadState.textContent = "Upload OK ✅ (analyse Sensi en cours…)";
       fileInput.value = "";
       input.value = "";
@@ -288,12 +332,7 @@ form.addEventListener("submit", async (e) => {
 
     if (!message) return;
 
-    socket.emit("chatMessage", {
-      username,
-      userId: myUserId,
-      message,
-      project: currentProject,
-    });
+    socket.emit("chatMessage", { username, userId: myUserId, message, project: currentProject });
 
     input.value = "";
     input.focus();
@@ -302,7 +341,6 @@ form.addEventListener("submit", async (e) => {
     alert(`Erreur: ${err.message}`);
     uploadState.textContent = "";
   } finally {
-    const submitBtn = form.querySelector("button[type=submit]");
     if (submitBtn) submitBtn.disabled = false;
   }
 });
@@ -389,27 +427,50 @@ socket.on("projectDeleted", ({ project }) => {
 
 socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
 
-socket.on("connect", async () => {
-  console.log("✅ Connecté Socket.io", socket.id);
+/* connect bootstrap */
+const last = restoreLastSession();
+let projectsLoadedOnce = false;
 
-  // ✅ compatible avec ton /projects qui renvoie {ok:true, projects:[...]}
+async function loadProjectsOnce() {
+  if (projectsLoadedOnce) return;
+  projectsLoadedOnce = true;
+
+  // 1) HTTP first (compatible avec ton /projects: {ok:true, projects:[...]} ou [...])
   try {
     const res = await fetch("/projects");
     const data = await res.json().catch(() => ({}));
 
-    // accepte: { ok:true, projects:[...] } OU directement [...]
     const list =
       Array.isArray(data) ? data :
       Array.isArray(data?.projects) ? data.projects :
       [];
 
-    if (list.length > 0) setProjectsOptions(list, true);
-  } catch (_) {
-    // fallback socket
-    socket.emit("getProjects");
-  }
+    if (list.length > 0) {
+      setProjectsOptions(list, true);
 
+      // restore last project if exists
+      const want = cleanStr(last?.p);
+      if (want && list.includes(want)) projectSelect.value = want;
+
+      return; // ✅ stop here, no need to ask socket
+    }
+  } catch (_) {}
+
+  // 2) fallback socket
   socket.emit("getProjects");
+}
+
+socket.on("connect", async () => {
+  console.log("✅ Connecté Socket.io", socket.id);
+  await loadProjectsOnce();
+
+  // Option auto-join si on a un pseudo + un projet sélectionné
+  const u = cleanStr(usernameInput.value);
+  const p = cleanStr(projectSelect.value);
+  if (u && p && !currentProject) {
+    // tu peux commenter la ligne suivante si tu ne veux pas l'auto-join
+    // joinProject();
+  }
 });
 
 socket.on("disconnect", () => addSystem("Déconnecté du serveur…"));
