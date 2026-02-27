@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — CLEAN + Sensi auto-web + upload + delete + presence + projects
+// guibs:/server.js (COMPLET) — dynamic-projects-v6-auto-web (fix OpenAI tools format)
 "use strict";
 
 const express = require("express");
@@ -11,7 +11,9 @@ const multer = require("multer");
 const { Server } = require("socket.io");
 
 let OpenAI = null;
-try { OpenAI = require("openai"); } catch (_) {}
+try {
+  OpenAI = require("openai");
+} catch (_) {}
 
 const app = express();
 app.set("trust proxy", 1);
@@ -24,11 +26,9 @@ app.use(express.static(__dirname));
    CONFIG
 ================================================== */
 const APP_VERSION = process.env.APP_VERSION || "dynamic-projects-v6-auto-web";
-
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
-
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 
 const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 200);
@@ -39,7 +39,7 @@ const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 
-// Web search provider
+// Web search provider (optionnel)
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const SERPER_ENDPOINT = "https://google.serper.dev/search";
 
@@ -52,7 +52,7 @@ function ensureDirs() {
   if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
   if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["Ever"], null, 2), "utf8");
 }
-ensureDirs();
+try { ensureDirs(); } catch (e) { console.error("[init] ensureDirs failed:", e); }
 
 app.use("/uploads", express.static(UPLOADS_DIR));
 
@@ -60,8 +60,7 @@ app.use("/uploads", express.static(UPLOADS_DIR));
    STORAGE
 ================================================== */
 function readJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
-  catch { return fallback; }
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
 function writeJSON(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
@@ -70,13 +69,15 @@ function writeJSON(file, data) {
 
 let historyByProject = readJSON(HISTORY_FILE, {});
 let projects = readJSON(PROJECTS_FILE, ["Ever"]);
-
 if (!Array.isArray(projects) || projects.length === 0) projects = ["Ever"];
 projects = Array.from(new Set(projects.map((p) => String(p || "").trim()).filter(Boolean)));
 if (projects.length === 0) projects = ["Ever"];
 
 function cleanStr(v) { return String(v ?? "").trim(); }
-function safeProjectKey(project) { const p = cleanStr(project); return p ? p.slice(0, 80) : ""; }
+function safeProjectKey(project) {
+  const p = cleanStr(project);
+  return p ? p.slice(0, 80) : "";
+}
 function isValidProjectName(name) { return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name); }
 function listProjects() { return projects.slice().sort((a, b) => a.localeCompare(b, "fr")); }
 function saveProjects() { writeJSON(PROJECTS_FILE, projects); }
@@ -85,7 +86,10 @@ function saveHistoryNow() { writeJSON(HISTORY_FILE, historyByProject); }
 let saveTimer = null;
 function scheduleHistorySave() {
   if (saveTimer) return;
-  saveTimer = setTimeout(() => { saveTimer = null; saveHistoryNow(); }, 400);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveHistoryNow();
+  }, 400);
 }
 
 function getHistory(project) {
@@ -151,7 +155,7 @@ app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 /* ==================================================
-   SOCKET.IO INIT (io doit exister avant /upload)
+   SOCKET.IO INIT (server + io)
 ================================================== */
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
@@ -186,9 +190,13 @@ const upload = multer({
     if (allowedExt.has(ext)) return cb(null, true);
 
     const allowedMime = new Set([
-      "image/png", "image/jpeg", "image/webp",
+      "image/png",
+      "image/jpeg",
+      "image/webp",
       "application/pdf",
-      "text/plain", "text/markdown", "text/csv",
+      "text/plain",
+      "text/markdown",
+      "text/csv",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ]);
@@ -197,12 +205,6 @@ const upload = multer({
     cb(new Error("Type de fichier non autorisé."));
   },
 });
-
-function emitSensi(project, text, meta = {}) {
-  const msg = { id: Date.now(), ts: Date.now(), project, username: "Sensi", userId: "sensi", message: text, meta };
-  pushMessage(project, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message, meta: msg.meta });
-  io.to(project).emit("chatMessage", msg);
-}
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
@@ -226,12 +228,30 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       size: req.file.size,
     };
 
-    const msg = { id: Date.now(), ts: Date.now(), project, username, userId, message: `📎 ${attachment.filename}`, attachment };
+    const msg = {
+      id: Date.now(),
+      ts: Date.now(),
+      project,
+      username,
+      userId,
+      message: `📎 ${attachment.filename}`,
+      attachment,
+    };
 
-    pushMessage(project, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message, attachment: msg.attachment });
+    pushMessage(project, {
+      id: msg.id,
+      ts: msg.ts,
+      username: msg.username,
+      userId: msg.userId,
+      message: msg.message,
+      attachment: msg.attachment,
+    });
+
     io.to(project).emit("chatMessage", msg);
 
-    emitSensi(project, `🧠 Fichier reçu: ${attachment.filename} (analyse auto activée)`);
+    // analyse fichier par Sensi (optionnel)
+    analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+
     res.json({ ok: true, project, attachment });
   } catch (e) {
     console.error("[upload]", e);
@@ -240,65 +260,109 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 /* ==================================================
-   WEB SEARCH TOOL (Serper)
+   SENSI - EMIT HELPERS
+================================================== */
+function emitSensi(project, text, meta = {}) {
+  const msg = {
+    id: Date.now(),
+    ts: Date.now(),
+    project,
+    username: "Sensi",
+    userId: "sensi",
+    message: text,
+    meta,
+  };
+
+  pushMessage(project, {
+    id: msg.id,
+    ts: msg.ts,
+    username: msg.username,
+    userId: msg.userId,
+    message: msg.message,
+    meta: msg.meta,
+  });
+
+  io.to(project).emit("chatMessage", msg);
+}
+
+/* ==================================================
+   WEB SEARCH (Serper) — optionnel
 ================================================== */
 async function serperSearch(query, num = 6) {
   if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY missing");
   const q = cleanStr(query);
   if (!q) return [];
+
   const resp = await fetch(SERPER_ENDPOINT, {
     method: "POST",
     headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ q, num }),
   });
-  if (!resp.ok) throw new Error(`Serper error: ${resp.status}`);
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Serper error: ${resp.status} ${t}`);
+  }
+
   const data = await resp.json();
-  return (data?.organic || []).slice(0, num).map((r) => ({
-    title: r.title || "", link: r.link || "", snippet: r.snippet || "", source: "organic",
-  }));
+  const items = [];
+  for (const r of (data?.organic || []).slice(0, num)) {
+    items.push({
+      title: r.title || "",
+      link: r.link || "",
+      snippet: r.snippet || "",
+      source: "organic",
+    });
+  }
+  return items;
 }
 
-function formatSearchResults(results) {
-  if (!results || results.length === 0) return "Aucun résultat.";
-  return results.map((r, i) => `${i + 1}. ${r.title}\nURL: ${r.link}\nRésumé: ${r.snippet}`).join("\n\n");
-}
-
-function extractFunctionCallsFromResponses(resp) {
+/* ==================================================
+   SENSI - AUTO (OpenAI Responses) — FIXED TOOLS FORMAT
+================================================== */
+function extractFunctionCalls(resp) {
   const out = Array.isArray(resp?.output) ? resp.output : [];
   return out.filter((item) => item && item.type === "function_call");
 }
 
 async function sensiRespondToUserMessage({ project, username, userText }) {
-  if (!hasOpenAI()) return;
+  if (!hasOpenAI()) {
+    emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
+    return;
+  }
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  const tools = [{
-    type: "function",
-    function: {
+  // ✅ Responses API tools format: {type:"function", name, description, parameters}
+  const tools = [
+    {
+      type: "function",
       name: "web_search",
-      description: "Recherche web si nécessaire (infos récentes, sources officielles).",
+      description:
+        "Recherche sur le web des informations à jour (actualités, faits récents, pages officielles). " +
+        "Utiliser seulement si nécessaire pour répondre correctement.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string" },
-          num: { type: "integer", default: 6 },
+          query: { type: "string", description: "Requête de recherche web." },
+          num: { type: "integer", description: "Nombre de résultats (max 8).", default: 6 },
         },
         required: ["query"],
       },
     },
-  }];
+  ];
 
   const system = `
-Tu es Sensi.
-Si tu as besoin d'infos récentes/spécifiques non garanties, appelle web_search.
-Sinon répond sans web.
-Si web_search utilisé: donne une liste de sources (titre + URL).
-Réponds en français, actionnable.
+Tu es Sensi, IA d'assistance au travail collaboratif.
+Règle clé: si la question nécessite des infos récentes ou spécifiques non garanties, tu DOIS utiliser l'outil web_search.
+Sinon, répond sans recherche.
+Quand tu utilises le web, cite tes sources sous forme de liste: titre + URL.
+Réponds en français, clair, actionnable, pas de blabla.
 `.trim();
 
   const userPrompt = `Message de ${username} (projet ${project}) : ${userText}`;
 
+  // 1) Model decides if it needs web_search
   let response = await client.responses.create({
     model: OPENAI_MODEL,
     input: [
@@ -307,26 +371,31 @@ Réponds en français, actionnable.
     ],
     tools,
     tool_choice: "auto",
-    max_output_tokens: 350,
+    max_output_tokens: 400,
   });
 
-  const fnCalls = extractFunctionCallsFromResponses(response);
+  const calls = extractFunctionCalls(response);
 
-  if (!fnCalls.length) {
+  // direct answer (no tool)
+  if (!calls.length) {
     const out = (response.output_text || "").trim();
     if (out) emitSensi(project, out);
     return;
   }
 
-  const toolOutputs = [];
-  for (const call of fnCalls) {
+  // execute tool calls
+  const tool_outputs = [];
+  for (const call of calls) {
     if (call?.name !== "web_search") continue;
 
     let args = {};
     try { args = call?.arguments ? JSON.parse(call.arguments) : {}; } catch { args = {}; }
 
     if (!hasWeb()) {
-      toolOutputs.push({ tool_call_id: call.call_id || call.id, output: JSON.stringify({ error: "SERPER_API_KEY missing" }) });
+      tool_outputs.push({
+        tool_call_id: call.call_id || call.id,
+        output: JSON.stringify({ error: "Web search disabled (SERPER_API_KEY missing)." }),
+      });
       continue;
     }
 
@@ -334,12 +403,13 @@ Réponds en français, actionnable.
     const n = Math.max(1, Math.min(Number(args.num || 6), 8));
     const results = await serperSearch(q, n);
 
-    toolOutputs.push({
+    tool_outputs.push({
       tool_call_id: call.call_id || call.id,
-      output: JSON.stringify({ query: q, results, formatted: formatSearchResults(results) }),
+      output: JSON.stringify({ query: q, results }),
     });
   }
 
+  // 2) Final answer using tool outputs
   response = await client.responses.create({
     model: OPENAI_MODEL,
     input: [
@@ -348,8 +418,8 @@ Réponds en français, actionnable.
     ],
     tools,
     tool_choice: "auto",
-    tool_outputs: toolOutputs,
-    max_output_tokens: 450,
+    tool_outputs,
+    max_output_tokens: 500,
   });
 
   const out = (response.output_text || "").trim();
@@ -357,19 +427,110 @@ Réponds en français, actionnable.
 }
 
 /* ==================================================
-   SOCKET.IO LOGIC
+   SENSI - FILE ANALYSIS (simple)
 ================================================== */
+async function extractTextFromFile(localFilePath, mimetype, originalName) {
+  const ext = (path.extname(originalName || "") || "").toLowerCase();
+
+  if (mimetype.startsWith("text/") || [".txt", ".md", ".csv"].includes(ext)) {
+    const raw = fs.readFileSync(localFilePath, "utf8");
+    return raw.slice(0, 12000);
+  }
+
+  if (mimetype === "application/pdf" || ext === ".pdf") {
+    try {
+      const pdfParse = require("pdf-parse");
+      const buf = fs.readFileSync(localFilePath);
+      const out = await pdfParse(buf);
+      return String(out?.text || "").slice(0, 12000);
+    } catch { return ""; }
+  }
+
+  if (ext === ".docx") {
+    try {
+      const mammoth = require("mammoth");
+      const result = await mammoth.extractRawText({ path: localFilePath });
+      return String(result?.value || "").slice(0, 12000);
+    } catch { return ""; }
+  }
+
+  if (ext === ".xlsx") {
+    try {
+      const XLSX = require("xlsx");
+      const wb = XLSX.readFile(localFilePath);
+      const sheetName = wb.SheetNames?.[0];
+      if (!sheetName) return "";
+      const ws = wb.Sheets[sheetName];
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      return String(csv || "").slice(0, 12000);
+    } catch { return ""; }
+  }
+
+  return "";
+}
+
+async function analyzeFileWithSensi({ project, username, attachment }) {
+  if (!hasOpenAI()) {
+    emitSensi(project, `ℹ️ IA non configurée. Fichier reçu : ${attachment.filename}`);
+    return;
+  }
+
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  const isImage = String(attachment.mimetype || "").startsWith("image/");
+  const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
+
+  let extracted = "";
+  if (!isImage) extracted = await extractTextFromFile(localPath, attachment.mimetype, attachment.filename);
+
+  const system = `Tu es Sensi. Analyse le fichier et propose résumé + points clés + actions.`;
+
+  const userParts = [{
+    type: "input_text",
+    text:
+      `Fichier envoyé par "${username}" dans "${project}".\n` +
+      `Nom: ${attachment.filename}\nType: ${attachment.mimetype}\n` +
+      (isImage ? `Image: ${attachment.url}\nAnalyse l'image.` : `Extrait:\n${extracted || "(pas d'extraction dispo)"}`),
+  }];
+
+  if (isImage) userParts.push({ type: "input_image", image_url: attachment.url });
+
+  const resp = await client.responses.create({
+    model: OPENAI_MODEL,
+    input: [
+      { role: "system", content: [{ type: "input_text", text: system }] },
+      { role: "user", content: userParts },
+    ],
+    max_output_tokens: 450,
+  });
+
+  const out = (resp.output_text || "").trim();
+  if (out) emitSensi(project, `🧠 Analyse Sensi — ${attachment.filename}\n\n${out}`);
+}
+
+/* ==================================================
+   SOCKET.IO
+================================================== */
+// presence: project -> Map(socketId -> { username, userId })
 const presence = new Map();
+
 function getUsers(project) {
   const map = presence.get(project);
   if (!map) return [];
   return Array.from(map.values()).map((v) => v.username).filter(Boolean);
 }
-function emitPresence(project) { io.to(project).emit("presenceUpdate", { project, users: getUsers(project) }); }
-function emitSystem(project, text) { io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text }); }
-function broadcastProjects() { io.emit("projectsUpdate", { projects: listProjects() }); }
+function emitPresence(project) {
+  io.to(project).emit("presenceUpdate", { project, users: getUsers(project) });
+}
+function emitSystem(project, text) {
+  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
+}
+function broadcastProjects() {
+  io.emit("projectsUpdate", { projects: listProjects() });
+}
 
 io.on("connection", (socket) => {
+  console.log("Socket connected:", socket.id);
   socket.data.userId = "";
   socket.data.username = "";
 
@@ -377,7 +538,7 @@ io.on("connection", (socket) => {
 
   socket.on("createProject", ({ name }) => {
     const n = cleanStr(name);
-    if (!isValidProjectName(n)) return socket.emit("projectError", { message: "Nom invalide." });
+    if (!isValidProjectName(n)) return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
     if (projects.includes(n)) return socket.emit("projectError", { message: "Projet déjà existant." });
     projects.push(n);
     projects = Array.from(new Set(projects));
@@ -392,10 +553,11 @@ io.on("connection", (socket) => {
     if (projects.length <= 1) return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
 
     io.to(p).emit("projectDeleted", { project: p });
-    delete historyByProject[p];
-    presence.delete(p);
+    if (historyByProject[p]) delete historyByProject[p];
+    if (presence.has(p)) presence.delete(p);
 
     projects = projects.filter((x) => x !== p);
+    if (projects.length === 0) projects = ["Ever"];
     saveProjects();
     saveHistoryNow();
     broadcastProjects();
@@ -405,9 +567,14 @@ io.on("connection", (socket) => {
     const p = safeProjectKey(project);
     const u = cleanStr(username) || "Anonyme";
     const uid = cleanStr(userId);
+
     if (!p) return;
-    if (!projects.includes(p)) return socket.emit("projectError", { message: `Projet "${p}" inexistant.` });
-    if (!uid) return socket.emit("projectError", { message: "userId manquant." });
+    if (!projects.includes(p)) {
+      socket.emit("projectError", { message: `Projet "${p}" inexistant.` });
+      socket.emit("projectsUpdate", { projects: listProjects() });
+      return;
+    }
+    if (!uid) return socket.emit("projectError", { message: "Identifiant utilisateur manquant (userId)." });
 
     socket.data.userId = uid;
     socket.data.username = u;
@@ -433,9 +600,11 @@ io.on("connection", (socket) => {
     if (!uid) return;
 
     const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, userId: uid, message: m };
+
     pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
     io.to(p).emit("chatMessage", msg);
 
+    // 🔥 Sensi auto
     sensiRespondToUserMessage({ project: p, username: u, userText: m }).catch((e) => {
       console.error("[sensi-auto]", e);
       emitSensi(p, "⚠️ Erreur Sensi (voir logs).");
@@ -446,12 +615,15 @@ io.on("connection", (socket) => {
     const p = safeProjectKey(project);
     const id = Number(messageId);
     const uid = cleanStr(userId) || socket.data.userId;
+
     if (!p || !Number.isFinite(id)) return;
     if (!projects.includes(p)) return;
 
     const res = deleteMessageIfAuthor(p, id, uid);
-    if (!res.ok) return;
-
+    if (!res.ok) {
+      if (res.reason === "not_author") socket.emit("projectError", { message: "Suppression refusée : seul l’auteur peut supprimer ce message." });
+      return;
+    }
     io.to(p).emit("messageDeleted", { project: p, messageId: id });
   });
 
@@ -462,16 +634,18 @@ io.on("connection", (socket) => {
         emitPresence(proj);
       }
     }
+    console.log("Socket disconnected:", socket.id);
   });
 });
 
 /* ==================================================
-   START
+   SAFETY + START
 ================================================== */
 process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
 process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 
 process.on("SIGTERM", () => {
+  console.warn("[SIGTERM] shutting down");
   try { saveProjects(); saveHistoryNow(); } catch (_) {}
   server.close(() => process.exit(0));
 });
