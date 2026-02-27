@@ -1,20 +1,37 @@
-// guibs:/client.js (COMPLET) — adapté (robustesse + compat /projects + UX + auto-join optionnel)
+// guibs:/client.js (COMPLET) — ULTRA v2
 // ✅ gère /projects en {ok:true, projects:[...]} OU en [...]
-// ✅ évite double chargement (fetch + socket) + garde un fallback
-// ✅ option: auto-join si pseudo déjà saisi + projet dispo
+// ✅ évite double chargement (fetch + socket)
+// ✅ option: auto-join (flag AUTO_JOIN)
+// ✅ UX upload + sécurité (pseudo/projet requis)
+
 const socket = io(window.location.origin, { transports: ["websocket"] });
 
+/** =========================
+ *  FLAGS
+ *  ========================= */
+const AUTO_JOIN = false; // <- mets true si tu veux auto-join dès que pseudo + projet dispo
+
+/** =========================
+ *  STATE
+ *  ========================= */
 let currentProject = null;
 let currentUsername = null;
 
 const seenMessageIds = new Set();
 const messageNodes = new Map();
 
+/** =========================
+ *  STORAGE
+ *  ========================= */
 const LS_USER_ID = "sensi_user_id";
 const LS_LAST_USERNAME = "sensi_last_username";
 const LS_LAST_PROJECT = "sensi_last_project";
+
 const myUserId = getOrCreateUserId();
 
+/** =========================
+ *  DOM
+ *  ========================= */
 const chat = document.getElementById("chat");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
@@ -33,7 +50,9 @@ const usersList = document.getElementById("users");
 const usersCount = document.getElementById("users-count");
 const currentProjectLabel = document.getElementById("current-project-label");
 
-/* utils */
+/** =========================
+ *  UTILS
+ *  ========================= */
 function cleanStr(v) { return String(v ?? "").trim(); }
 
 function escapeHtml(str) {
@@ -50,17 +69,21 @@ function formatTime(ts) {
     if (!ts) return "";
     const d = new Date(ts);
     return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  } catch { return ""; }
+  } catch {
+    return "";
+  }
 }
 
 function getOrCreateUserId() {
   try {
     const existing = localStorage.getItem(LS_USER_ID);
     if (existing && existing.length >= 8) return existing;
+
     const uid = (crypto?.randomUUID
       ? crypto.randomUUID()
       : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`
     );
+
     localStorage.setItem(LS_USER_ID, uid);
     return uid;
   } catch {
@@ -79,14 +102,22 @@ function restoreLastSession() {
   try {
     const u = cleanStr(localStorage.getItem(LS_LAST_USERNAME));
     const p = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+
     if (u && !cleanStr(usernameInput.value)) usernameInput.value = u;
+
     return { u, p };
   } catch {
     return { u: "", p: "" };
   }
 }
 
-/* UI */
+function setProjectLabel(p) {
+  currentProjectLabel.textContent = p || "—";
+}
+
+/** =========================
+ *  UI
+ *  ========================= */
 function clearChat() {
   chat.innerHTML = "";
   seenMessageIds.clear();
@@ -109,8 +140,10 @@ document.addEventListener("click", () => closeAllMenus());
 function removeMessageFromUI(messageId) {
   const id = Number(messageId);
   if (!Number.isFinite(id)) return;
+
   const node = messageNodes.get(id);
   if (node && node.parentNode) node.parentNode.removeChild(node);
+
   messageNodes.delete(id);
   seenMessageIds.delete(id);
 }
@@ -121,14 +154,17 @@ function renderAttachment(att) {
   const url = escapeHtml(att.url);
   const isImg = String(att.mimetype || "").startsWith("image/");
 
+  // fichiers générés /generated ou uploads /uploads = identique côté UI
   if (isImg) {
     return `
       <div style="margin-top:6px;">
         <a href="${url}" target="_blank" rel="noopener">🖼️ ${name}</a><br/>
-        <img src="${url}" alt="${name}" style="max-width:260px; border:1px solid #ddd; border-radius:10px; margin-top:6px;" />
+        <img src="${url}" alt="${name}"
+             style="max-width:260px; border:1px solid #ddd; border-radius:10px; margin-top:6px;" />
       </div>
     `;
   }
+
   return `<div style="margin-top:6px;"><a href="${url}" target="_blank" rel="noopener">📄 ${name}</a></div>`;
 }
 
@@ -214,8 +250,6 @@ function renderUsers(users) {
   }
 }
 
-function setProjectLabel(p) { currentProjectLabel.textContent = p || "—"; }
-
 function setProjectsOptions(projects, keepSelection = true) {
   const prev = keepSelection ? cleanStr(projectSelect.value) : "";
   projectSelect.innerHTML = "";
@@ -239,7 +273,9 @@ function setProjectsOptions(projects, keepSelection = true) {
   }
 }
 
-/* join */
+/** =========================
+ *  JOIN
+ *  ========================= */
 function joinProject() {
   const username = cleanStr(usernameInput.value);
   const project = cleanStr(projectSelect.value);
@@ -260,9 +296,13 @@ function joinProject() {
 }
 
 joinBtn.addEventListener("click", joinProject);
-usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
+usernameInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") joinProject();
+});
 
-/* projects crud */
+/** =========================
+ *  PROJECTS CRUD
+ *  ========================= */
 createProjectBtn.addEventListener("click", () => {
   const name = cleanStr(newProjectInput.value);
   if (!name) return;
@@ -287,13 +327,17 @@ deleteProjectBtn.addEventListener("click", () => {
   socket.emit("deleteProject", { project: p });
 });
 
-/* upload */
+/** =========================
+ *  UPLOAD
+ *  ========================= */
 async function uploadFile(file) {
   if (!currentProject) throw new Error("Aucun projet rejoint.");
+  const username = currentUsername || cleanStr(usernameInput.value) || "Anonyme";
+
   const fd = new FormData();
   fd.append("file", file);
   fd.append("project", currentProject);
-  fd.append("username", currentUsername || cleanStr(usernameInput.value) || "Anonyme");
+  fd.append("username", username);
   fd.append("userId", myUserId);
 
   const res = await fetch("/upload", { method: "POST", body: fd });
@@ -302,17 +346,18 @@ async function uploadFile(file) {
   return data;
 }
 
-/* send */
+/** =========================
+ *  SEND
+ *  ========================= */
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (!currentProject) return;
 
+  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
   const username = cleanStr(usernameInput.value);
-  if (!username) return;
+  if (!username) return alert("Entre un pseudo 🙂");
 
   const message = cleanStr(input.value);
   const file = fileInput?.files?.[0];
-
   const submitBtn = form.querySelector("button[type=submit]");
 
   try {
@@ -332,7 +377,16 @@ form.addEventListener("submit", async (e) => {
 
     if (!message) return;
 
-    socket.emit("chatMessage", { username, userId: myUserId, message, project: currentProject });
+    // garde currentUsername à jour
+    currentUsername = username;
+    saveLastSession();
+
+    socket.emit("chatMessage", {
+      username,
+      userId: myUserId,
+      message,
+      project: currentProject,
+    });
 
     input.value = "";
     input.focus();
@@ -345,7 +399,9 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-/* receive */
+/** =========================
+ *  RECEIVE
+ *  ========================= */
 socket.on("chatHistory", (payload) => {
   const p = cleanStr(payload?.project);
   const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
@@ -405,6 +461,10 @@ socket.on("projectsUpdate", (payload) => {
   const list = Array.isArray(payload?.projects) ? payload.projects : [];
   setProjectsOptions(list, true);
 
+  // restore last project if possible
+  const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+  if (want && list.includes(want)) projectSelect.value = want;
+
   if (currentProject && !list.includes(currentProject)) {
     currentProject = null;
     setProjectLabel("—");
@@ -427,7 +487,9 @@ socket.on("projectDeleted", ({ project }) => {
 
 socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
 
-/* connect bootstrap */
+/** =========================
+ *  CONNECT BOOTSTRAP
+ *  ========================= */
 const last = restoreLastSession();
 let projectsLoadedOnce = false;
 
@@ -435,7 +497,7 @@ async function loadProjectsOnce() {
   if (projectsLoadedOnce) return;
   projectsLoadedOnce = true;
 
-  // 1) HTTP first (compatible avec ton /projects: {ok:true, projects:[...]} ou [...])
+  // 1) HTTP first (ton /projects => {ok:true, projects:[...]} ou [...])
   try {
     const res = await fetch("/projects");
     const data = await res.json().catch(() => ({}));
@@ -448,11 +510,11 @@ async function loadProjectsOnce() {
     if (list.length > 0) {
       setProjectsOptions(list, true);
 
-      // restore last project if exists
+      // restore last project
       const want = cleanStr(last?.p);
       if (want && list.includes(want)) projectSelect.value = want;
 
-      return; // ✅ stop here, no need to ask socket
+      return;
     }
   } catch (_) {}
 
@@ -462,14 +524,13 @@ async function loadProjectsOnce() {
 
 socket.on("connect", async () => {
   console.log("✅ Connecté Socket.io", socket.id);
+
   await loadProjectsOnce();
 
-  // Option auto-join si on a un pseudo + un projet sélectionné
-  const u = cleanStr(usernameInput.value);
-  const p = cleanStr(projectSelect.value);
-  if (u && p && !currentProject) {
-    // tu peux commenter la ligne suivante si tu ne veux pas l'auto-join
-    // joinProject();
+  if (AUTO_JOIN) {
+    const u = cleanStr(usernameInput.value);
+    const p = cleanStr(projectSelect.value);
+    if (u && p && !currentProject) joinProject();
   }
 });
 

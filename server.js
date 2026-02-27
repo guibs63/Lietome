@@ -1,4 +1,5 @@
-// guibs:/server.js (COMPLET) — Sensi auto + Serper web + mémoire intelligente (GLOBAL + par PROJET)
+// guibs:/server.js (COMPLET) — ULTRA v2
+// WEB libre (search + open any URL) + Upload + Analyse docs/images + Mémoire globale + Création fichiers (docx/xlsx/pptx/png)
 "use strict";
 
 const express = require("express");
@@ -9,130 +10,127 @@ const fs = require("fs");
 const crypto = require("crypto");
 const multer = require("multer");
 const { Server } = require("socket.io");
+const OpenAI = require("openai");
 
-let OpenAI = null;
-try { OpenAI = require("openai"); } catch (_) {}
+// Web extraction
+const { JSDOM } = require("jsdom");
+const { Readability } = require("@mozilla/readability");
 
-/* ==================================================
-   APP INIT
-================================================== */
+// Docs creation
+const { Document, Packer, Paragraph, HeadingLevel, TextRun } = require("docx");
+const ExcelJS = require("exceljs");
+const PptxGenJS = require("pptxgenjs");
+
+// ==================================================
+// APP INIT
+// ==================================================
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "3mb" }));
 app.use(express.static(__dirname));
 
-/* ==================================================
-   CONFIG
-================================================== */
-const APP_VERSION = process.env.APP_VERSION || "dynamic-projects-v9-global-memory";
-
+// ==================================================
+// CONFIG
+// ==================================================
+const APP_VERSION = process.env.APP_VERSION || "ultra-v2-web-any-create-files";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
-
-// Memory files
-const MEMORY_PROJECT_FILE = path.join(STORAGE_DIR, "memory.json");         // { [project]: MemoryItem[] }
-const MEMORY_GLOBAL_FILE  = path.join(STORAGE_DIR, "memory_global.json");  // MemoryItem[]
-
+const MEMORY_FILE = path.join(STORAGE_DIR, "global_memory.json");
 const UPLOADS_DIR = path.join(__dirname, "uploads");
+const GENERATED_DIR = path.join(__dirname, "generated");
 
-const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 200);
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 15);
+const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 350);
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 25);
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 // IA
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// Web (Serper)
+// WEB provider (Serper)
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const SERPER_ENDPOINT = "https://google.serper.dev/search";
 
-/* ==================================================
-   INIT DIRS
-================================================== */
+// Web behavior (mode "any")
+const WEB_MAX_RESULTS = Number(process.env.WEB_MAX_RESULTS || 10);
+const WEB_FETCH_PAGES = Number(process.env.WEB_FETCH_PAGES || 6);
+const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
+const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
+
+// Cache
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
+
+// ==================================================
+// INIT DIRS
+// ==================================================
 function ensureDirs() {
-  try {
-    if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  if (!fs.existsSync(GENERATED_DIR)) fs.mkdirSync(GENERATED_DIR, { recursive: true });
 
-    if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
-    if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["Ever"], null, 2), "utf8");
-
-    if (!fs.existsSync(MEMORY_PROJECT_FILE)) fs.writeFileSync(MEMORY_PROJECT_FILE, JSON.stringify({}, null, 2), "utf8");
-    if (!fs.existsSync(MEMORY_GLOBAL_FILE)) fs.writeFileSync(MEMORY_GLOBAL_FILE, JSON.stringify([], null, 2), "utf8");
-  } catch (e) {
-    console.error("[init] ensureDirs failed:", e);
-  }
+  if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
+  if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["test"], null, 2), "utf8");
+  if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({ facts: [] }, null, 2), "utf8");
 }
 ensureDirs();
 
 app.use("/uploads", express.static(UPLOADS_DIR));
+app.use("/generated", express.static(GENERATED_DIR));
 
-/* ==================================================
-   STORAGE HELPERS
-================================================== */
+// ==================================================
+// HELPERS
+// ==================================================
 function readJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
-  catch { return fallback; }
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
 function writeJSON(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
   catch (e) { console.error("[storage] write failed:", file, e); }
 }
-
-let historyByProject = readJSON(HISTORY_FILE, {});
-let projects = readJSON(PROJECTS_FILE, ["Ever"]);
-
-// Memory
-let memoryByProject = readJSON(MEMORY_PROJECT_FILE, {});   // { [project]: MemoryItem[] }
-let memoryGlobal = readJSON(MEMORY_GLOBAL_FILE, []);       // MemoryItem[]
-
-if (!Array.isArray(projects) || projects.length === 0) projects = ["Ever"];
-projects = Array.from(new Set(projects.map((p) => String(p || "").trim()).filter(Boolean)));
-if (projects.length === 0) projects = ["Ever"];
-
 function cleanStr(v) { return String(v ?? "").trim(); }
-function safeProjectKey(project) { const p = cleanStr(project); return p ? p.slice(0, 80) : ""; }
-function isValidProjectName(name) { return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name); }
-function listProjects() { return projects.slice().sort((a, b) => a.localeCompare(b, "fr")); }
+function safeProjectKey(project) {
+  const p = cleanStr(project);
+  return p ? p.slice(0, 80) : "";
+}
+function isValidProjectName(name) {
+  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
+}
 
-function hasOpenAI() { return Boolean(OpenAI && process.env.OPENAI_API_KEY); }
+function hasOpenAI() { return Boolean(OPENAI_API_KEY); }
 function hasWeb() { return Boolean(SERPER_API_KEY); }
+function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
 
-function saveProjects() { writeJSON(PROJECTS_FILE, projects); }
-function saveHistoryNow() { writeJSON(HISTORY_FILE, historyByProject); }
-function saveMemoryProjectNow() { writeJSON(MEMORY_PROJECT_FILE, memoryByProject); }
-function saveMemoryGlobalNow() { writeJSON(MEMORY_GLOBAL_FILE, memoryGlobal); }
+// ==================================================
+// STATE
+// ==================================================
+let historyByProject = readJSON(HISTORY_FILE, {});
+let projects = readJSON(PROJECTS_FILE, ["test"]);
+let globalMemory = readJSON(MEMORY_FILE, { facts: [] });
 
+if (!Array.isArray(projects) || projects.length === 0) projects = ["test"];
+projects = Array.from(new Set(projects.map((p) => cleanStr(p)).filter(Boolean)));
+if (!globalMemory || typeof globalMemory !== "object") globalMemory = { facts: [] };
+if (!Array.isArray(globalMemory.facts)) globalMemory.facts = [];
+
+// save debounce
 let saveTimer = null;
 function scheduleHistorySave() {
   if (saveTimer) return;
-  saveTimer = setTimeout(() => { saveTimer = null; saveHistoryNow(); }, 400);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    writeJSON(HISTORY_FILE, historyByProject);
+  }, 400);
 }
+function saveProjectsNow() { writeJSON(PROJECTS_FILE, projects); }
+function saveMemoryNow() { writeJSON(MEMORY_FILE, globalMemory); }
 
-let memProjSaveTimer = null;
-function scheduleMemoryProjectSave() {
-  if (memProjSaveTimer) return;
-  memProjSaveTimer = setTimeout(() => { memProjSaveTimer = null; saveMemoryProjectNow(); }, 400);
-}
-
-let memGlobalSaveTimer = null;
-function scheduleMemoryGlobalSave() {
-  if (memGlobalSaveTimer) return;
-  memGlobalSaveTimer = setTimeout(() => { memGlobalSaveTimer = null; saveMemoryGlobalNow(); }, 400);
-}
-
-/* ==================================================
-   HISTORY
-================================================== */
 function getHistory(project) {
   const p = safeProjectKey(project);
   const arr = historyByProject[p];
   return Array.isArray(arr) ? arr : [];
 }
-
 function pushMessage(project, msgObj) {
   const p = safeProjectKey(project);
   if (!p) return;
@@ -143,158 +141,51 @@ function pushMessage(project, msgObj) {
   }
   scheduleHistorySave();
 }
-
-function deleteMessageIfAuthor(project, messageId, requesterUserId) {
-  const p = safeProjectKey(project);
-  if (!Array.isArray(historyByProject[p])) return { ok: false, reason: "no_history" };
-
-  const idNum = Number(messageId);
-  if (!Number.isFinite(idNum)) return { ok: false, reason: "bad_id" };
-
-  const reqId = cleanStr(requesterUserId);
-  if (!reqId) return { ok: false, reason: "no_user" };
-
-  const arr = historyByProject[p];
-  const idx = arr.findIndex((m) => Number(m?.id) === idNum);
-  if (idx === -1) return { ok: false, reason: "not_found" };
-
-  const msg = arr[idx];
-  if (cleanStr(msg?.userId) !== reqId) return { ok: false, reason: "not_author" };
-
-  arr.splice(idx, 1);
-  scheduleHistorySave();
-  return { ok: true };
+function listProjects() {
+  return projects.slice().sort((a, b) => a.localeCompare(b, "fr"));
 }
 
-/* ==================================================
-   MEMORY (GLOBAL + PROJECT)
-================================================== */
-/**
- * MemoryItem = {
- *   id: string,
- *   ts: number,
- *   text: string,
- *   type: "person"|"relationship"|"preference"|"project"|"fact"|"other",
- *   confidence: number, // 0..1
- *   scope: "global"|"project",
- *   project?: string,
- *   authorUserId: string,
- *   authorName: string
- * }
- */
-function normalizeMemoryText(t) {
-  return cleanStr(t)
-    .replace(/\s+/g, " ")
-    .replace(/[“”]/g, '"')
-    .slice(0, 240);
+// ==================================================
+// MEMORY GLOBAL
+// ==================================================
+function normalizeFactText(t) {
+  return cleanStr(t).replace(/\s+/g, " ").slice(0, 280);
 }
+function addGlobalFact({ text, who = "", project = "" }) {
+  const factText = normalizeFactText(text);
+  if (!factText) return false;
 
-function getProjectMemory(project) {
-  const p = safeProjectKey(project);
-  const arr = memoryByProject[p];
-  return Array.isArray(arr) ? arr : [];
-}
-function getGlobalMemory() {
-  return Array.isArray(memoryGlobal) ? memoryGlobal : [];
-}
+  const exists = globalMemory.facts.some((f) => normalizeFactText(f.text) === factText);
+  if (exists) return false;
 
-function addMemoryItem(scope, project, item) {
-  const txt = normalizeMemoryText(item?.text);
-  if (!txt) return { ok: false, reason: "empty" };
-
-  const mem = {
-    id: crypto.randomBytes(10).toString("hex"),
-    ts: Date.now(),
-    text: txt,
-    type: cleanStr(item?.type) || "fact",
-    confidence: Number.isFinite(Number(item?.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : 0.75,
-    scope,
-    project: scope === "project" ? safeProjectKey(project) : undefined,
-    authorUserId: cleanStr(item?.authorUserId) || "",
-    authorName: cleanStr(item?.authorName) || "",
-  };
-
-  if (scope === "global") {
-    if (!Array.isArray(memoryGlobal)) memoryGlobal = [];
-    const exists = memoryGlobal.some((x) => normalizeMemoryText(x?.text) === txt);
-    if (exists) return { ok: true, dedup: true };
-    memoryGlobal.push(mem);
-    if (memoryGlobal.length > 400) memoryGlobal = memoryGlobal.slice(-400);
-    scheduleMemoryGlobalSave();
-    return { ok: true, mem };
-  }
-
-  // project
-  const p = safeProjectKey(project);
-  if (!p) return { ok: false, reason: "bad_project" };
-
-  if (!Array.isArray(memoryByProject[p])) memoryByProject[p] = [];
-  const arr = memoryByProject[p];
-  const exists = arr.some((x) => normalizeMemoryText(x?.text) === txt);
-  if (exists) return { ok: true, dedup: true };
-
-  arr.push(mem);
-  if (arr.length > 250) memoryByProject[p] = arr.slice(-250);
-  scheduleMemoryProjectSave();
-  return { ok: true, mem };
-}
-
-function clearProjectMemory(project) {
-  const p = safeProjectKey(project);
-  if (!p) return false;
-  memoryByProject[p] = [];
-  scheduleMemoryProjectSave();
+  const now = Date.now();
+  globalMemory.facts.unshift({
+    id: `fact_${now}_${Math.random().toString(16).slice(2)}`,
+    text: factText,
+    who: cleanStr(who).slice(0, 80),
+    project: cleanStr(project).slice(0, 80),
+    ts: now,
+  });
+  if (globalMemory.facts.length > 500) globalMemory.facts = globalMemory.facts.slice(0, 500);
+  saveMemoryNow();
   return true;
 }
-function clearGlobalMemory() {
-  memoryGlobal = [];
-  scheduleMemoryGlobalSave();
-  return true;
+function memoryTop(n = 14) {
+  return globalMemory.facts.slice(0, n);
+}
+function renderMemoryBlock() {
+  const facts = memoryTop(14);
+  if (!facts.length) return "Aucune mémoire globale enregistrée.";
+  return facts.map((f, i) => `${i + 1}. ${f.text}`).join("\n");
 }
 
-function forgetMemoryByQuery(scope, project, query) {
-  const q = cleanStr(query).toLowerCase();
-  if (!q) return { ok: false, removed: 0 };
-
-  if (scope === "global") {
-    const before = getGlobalMemory().length;
-    memoryGlobal = getGlobalMemory().filter((m) => !String(m?.text || "").toLowerCase().includes(q));
-    const removed = before - memoryGlobal.length;
-    if (removed > 0) scheduleMemoryGlobalSave();
-    return { ok: true, removed };
-  }
-
-  const p = safeProjectKey(project);
-  const before = getProjectMemory(p).length;
-  memoryByProject[p] = getProjectMemory(p).filter((m) => !String(m?.text || "").toLowerCase().includes(q));
-  const removed = before - memoryByProject[p].length;
-  if (removed > 0) scheduleMemoryProjectSave();
-  return { ok: true, removed };
-}
-
-function formatMemoryForPrompt(project) {
-  const global = getGlobalMemory().slice(-35);
-  const proj = getProjectMemory(project).slice(-35);
-
-  const gTxt = global.length
-    ? global.map((m) => `- (global, ${m.type}, conf ${Math.round((m.confidence || 0) * 100)}%) ${m.text}`).join("\n")
-    : "(vide)";
-
-  const pTxt = proj.length
-    ? proj.map((m) => `- (projet, ${m.type}, conf ${Math.round((m.confidence || 0) * 100)}%) ${m.text}`).join("\n")
-    : "(vide)";
-
-  return { gTxt, pTxt };
-}
-
-/* ==================================================
-   ROUTES
-================================================== */
+// ==================================================
+// BASIC HEALTH
+// ==================================================
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     time: new Date().toISOString(),
-    env: process.env.NODE_ENV || "production",
     version: APP_VERSION,
     ai: hasOpenAI() ? "enabled" : "disabled",
     web: hasWeb() ? "enabled" : "disabled",
@@ -304,21 +195,24 @@ app.get("/health", (req, res) => {
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
-/* ==================================================
-   SOCKET.IO INIT
-================================================== */
+// ==================================================
+// SERVER + SOCKET
+// ==================================================
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-/* ==================================================
-   UPLOAD (HTTP)
-================================================== */
+// ==================================================
+// UPLOAD
+// ==================================================
 function extFromMime(mime, originalName) {
   const fallback = path.extname(originalName || "").slice(0, 10);
   if (fallback) return fallback;
+
   if (mime === "image/png") return ".png";
   if (mime === "image/jpeg") return ".jpg";
+  if (mime === "image/webp") return ".webp";
   if (mime === "application/pdf") return ".pdf";
+  if (mime === "text/plain") return ".txt";
   return "";
 }
 
@@ -334,22 +228,6 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: MAX_UPLOAD_BYTES },
-  fileFilter: (req, file, cb) => {
-    const allowedExt = new Set([".png", ".jpg", ".jpeg", ".webp", ".pdf", ".txt", ".md", ".csv", ".docx", ".xlsx"]);
-    const ext = (path.extname(file.originalname || "") || "").toLowerCase();
-    if (allowedExt.has(ext)) return cb(null, true);
-
-    const allowedMime = new Set([
-      "image/png","image/jpeg","image/webp",
-      "application/pdf",
-      "text/plain","text/markdown","text/csv",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ]);
-    if (allowedMime.has(file.mimetype)) return cb(null, true);
-
-    cb(new Error("Type de fichier non autorisé."));
-  },
 });
 
 app.post("/upload", upload.single("file"), async (req, res) => {
@@ -362,7 +240,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     if (!userId) return res.status(400).json({ ok: false, error: "userId manquant." });
     if (!req.file) return res.status(400).json({ ok: false, error: "Aucun fichier." });
 
-    const hostBase = PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+    const hostBase = `${req.protocol}://${req.get("host")}`;
     const url = `${hostBase}/uploads/${encodeURIComponent(req.file.filename)}`;
 
     const attachment = {
@@ -395,6 +273,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     io.to(project).emit("chatMessage", msg);
 
+    // auto analysis
     analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
 
     res.json({ ok: true, project, attachment });
@@ -404,47 +283,94 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ==================================================
-   EMIT HELPERS
-================================================== */
-function emitSensi(project, text, meta = {}) {
+// ==================================================
+// CHAT EMIT HELPERS
+// ==================================================
+function emitSensi(project, text, extra = {}) {
   const msg = {
     id: Date.now(),
     ts: Date.now(),
     project,
     username: "Sensi",
     userId: "sensi",
-    message: String(text || ""),
-    meta,
+    message: text,
+    ...extra,
   };
-
   pushMessage(project, {
     id: msg.id,
     ts: msg.ts,
     username: msg.username,
     userId: msg.userId,
     message: msg.message,
+    attachment: msg.attachment,
     meta: msg.meta,
   });
-
   io.to(project).emit("chatMessage", msg);
 }
-
 function emitSystem(project, text) {
   io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
 }
 
-/* ==================================================
-   WEB (Serper)
-================================================== */
-async function serperSearch(query, num = 6) {
+// ==================================================
+// DELETE author-only
+// ==================================================
+function deleteMessageIfAuthor(project, messageId, requesterUserId) {
+  const p = safeProjectKey(project);
+  if (!p) return { ok: false, reason: "bad_project" };
+  if (!Array.isArray(historyByProject[p])) return { ok: false, reason: "no_history" };
+
+  const idNum = Number(messageId);
+  if (!Number.isFinite(idNum)) return { ok: false, reason: "bad_id" };
+  const reqId = cleanStr(requesterUserId);
+  if (!reqId) return { ok: false, reason: "no_user" };
+
+  const arr = historyByProject[p];
+  const idx = arr.findIndex((m) => Number(m?.id) === idNum);
+  if (idx === -1) return { ok: false, reason: "not_found" };
+
+  const msg = arr[idx];
+  if (cleanStr(msg?.userId) !== reqId) return { ok: false, reason: "not_author" };
+
+  arr.splice(idx, 1);
+  scheduleHistorySave();
+  return { ok: true };
+}
+
+// ==================================================
+// WEB: CACHE
+// ==================================================
+const cache = new Map(); // key -> { ts, data }
+function cacheGet(key) {
+  const v = cache.get(key);
+  if (!v) return null;
+  if (Date.now() - v.ts > CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  return v.data;
+}
+function cacheSet(key, data) {
+  cache.set(key, { ts: Date.now(), data });
+}
+
+// ==================================================
+// WEB: SEARCH (Serper) + URL opening
+// ==================================================
+async function serperSearch(query, num = 10) {
   if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY missing");
   const q = cleanStr(query);
   if (!q) return [];
 
+  const cacheKey = `serper:${q}:${num}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
   const resp = await fetch(SERPER_ENDPOINT, {
     method: "POST",
-    headers: { "X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json" },
+    headers: {
+      "X-API-KEY": SERPER_API_KEY,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ q, num }),
   });
 
@@ -454,308 +380,300 @@ async function serperSearch(query, num = 6) {
   }
 
   const data = await resp.json();
-  return (data?.organic || []).slice(0, num).map((r) => ({
-    title: r.title || "",
-    link: r.link || "",
-    snippet: r.snippet || "",
-  }));
+  const items = [];
+  for (const r of (data?.organic || []).slice(0, num)) {
+    items.push({ title: r.title || "", link: r.link || "", snippet: r.snippet || "" });
+  }
+
+  cacheSet(cacheKey, items);
+  return items;
 }
 
-function formatSearchResults(results) {
-  if (!results || results.length === 0) return "Aucun résultat.";
-  return results
-    .map((r, i) => {
-      const t = cleanStr(r.title) || "Sans titre";
-      const l = cleanStr(r.link);
-      const s = cleanStr(r.snippet);
-      return `${i + 1}. ${t}\nURL: ${l}\nRésumé: ${s}`;
-    })
-    .join("\n\n");
+async function fetchWithTimeout(url, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/2.0)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    return resp;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function mightNeedWeb(userText) {
-  const t = cleanStr(userText).toLowerCase();
-  if (!t) return false;
-  const triggers = [
-    "aujourd", "hier", "demain", "en ce moment", "actu", "news",
-    "prix", "cours", "taux", "météo", "élection", "président",
-    "date", "horaire", "heure", "source", "site officiel", "lien"
-  ];
-  if (triggers.some((k) => t.includes(k))) return true;
-  if (t.startsWith("cherche ") || t.startsWith("recherche ") || t.includes("google")) return true;
-  return false;
+function cleanExtractedText(t) {
+  return cleanStr(t).replace(/\n{3,}/g, "\n\n").slice(0, WEB_MAX_CHARS_PER_PAGE);
 }
 
-/* ==================================================
-   OPENAI (simple, no tools/tool_outputs)
-================================================== */
-async function openaiText({ system, user, maxTokens = 520 }) {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const resp = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: [{ type: "input_text", text: system }] },
-      { role: "user", content: [{ type: "input_text", text: user }] },
-    ],
-    max_output_tokens: maxTokens,
-  });
-  return cleanStr(resp.output_text || "");
-}
+async function extractReadableTextFromUrl(url) {
+  const u = cleanStr(url);
+  if (!u) return { ok: false, url, text: "", title: "" };
 
-/* ==================================================
-   FORCED MEMO PARSING (GLOBAL by default)
-   - "mémorise : ..." => global
-   - "mémorise projet : ..." => project
-================================================== */
-function extractForcedMemo(userText) {
-  const t = cleanStr(userText);
-  if (!t) return { scope: "", text: "" };
-
-  const mProj = t.match(/^\s*(m[ée]morise|memo|note)\s+projet\s*[:\-]\s*(.+)$/i);
-  if (mProj && mProj[2]) return { scope: "project", text: cleanStr(mProj[2]) };
-
-  const m1 = t.match(/^\s*(m[ée]morise|memo|note)\s*[:\-]\s*(.+)$/i);
-  if (m1 && m1[2]) return { scope: "global", text: cleanStr(m1[2]) };
-
-  const m2 = t.match(/^\s*(m[ée]morise|memo|note)\s+que\s+(.+)$/i);
-  if (m2 && m2[2]) return { scope: "global", text: cleanStr(m2[2]) };
-
-  return { scope: "", text: "" };
-}
-
-/* ==================================================
-   INTELLIGENT MEMORY EXTRACTION
-================================================== */
-async function sensiExtractMemories({ project, username, userId, userText }) {
-  if (!hasOpenAI()) return { memories: [], ack: "" };
-
-  const { gTxt, pTxt } = formatMemoryForPrompt(project);
-
-  const system = `
-Tu es un extracteur de mémoire pour un chat collaboratif.
-Décide si le message contient des informations DURABLES et UTILES à mémoriser.
-
-Règles:
-- Mémorise des faits stables: relations ("X est mon épouse"), identités, préférences durables, contexte important, contraintes/decisions.
-- Ne mémorise PAS: humeur, small talk, questions ponctuelles, info éphémère.
-- Choisis un scope:
-  - "global" si c'est vrai pour l'utilisateur en général (ex: "Mel est mon épouse")
-  - "project" si c'est spécifique au projet (ex: "dans EverCell, on vise TRL3")
-- Réponds STRICTEMENT en JSON entre <json>...</json>.
-
-Format:
-{
-  "memories":[
-    {"text":"...", "type":"person|relationship|preference|project|fact|other", "confidence":0.0-1.0, "scope":"global|project"}
-  ],
-  "ack":"(si demande explicite de mémorisation: courte phrase, sinon vide)"
-}
-
-Mémoire actuelle (global):
-${gTxt}
-
-Mémoire actuelle (projet "${project}"):
-${pTxt}
-`.trim();
-
-  const user = `Projet: ${project}\nAuteur: ${username} (${userId})\nMessage: ${userText}`;
-
-  const out = await openaiText({ system, user, maxTokens: 380 });
-  const m = out.match(/<json>\s*([\s\S]+?)\s*<\/json>/i);
-  if (!m) return { memories: [], ack: "" };
+  const cacheKey = `page:${u}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
 
   try {
-    const parsed = JSON.parse(m[1]);
-    const memories = Array.isArray(parsed?.memories) ? parsed.memories : [];
-    const ack = cleanStr(parsed?.ack);
-    return { memories, ack };
+    const resp = await fetchWithTimeout(u, WEB_PAGE_TIMEOUT_MS);
+    if (!resp.ok) {
+      const out = { ok: false, url: u, text: "", title: "" };
+      cacheSet(cacheKey, out);
+      return out;
+    }
+
+    const ct = resp.headers.get("content-type") || "";
+    const raw = await resp.text().catch(() => "");
+    if (!ct.includes("text/html")) {
+      const out = { ok: true, url: u, title: "", text: cleanExtractedText(raw) };
+      cacheSet(cacheKey, out);
+      return out;
+    }
+
+    const dom = new JSDOM(raw, { url: u });
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
+
+    const title = cleanStr(article?.title) || cleanStr(dom.window.document.title) || "";
+    const text = cleanExtractedText(article?.textContent || "");
+
+    const out = { ok: true, url: u, title, text };
+    cacheSet(cacheKey, out);
+    return out;
   } catch {
-    return { memories: [], ack: "" };
+    const out = { ok: false, url: u, text: "", title: "" };
+    cacheSet(cacheKey, out);
+    return out;
   }
 }
 
-/* ==================================================
-   SENSI MAIN
-================================================== */
-async function sensiRespondToUserMessage({ project, username, userId, userText }) {
-  if (!hasOpenAI()) {
-    emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
-    return;
+function chunkText(text, chunkSize = 1400, overlap = 180) {
+  const t = cleanStr(text);
+  if (!t) return [];
+  const chunks = [];
+  let i = 0;
+  while (i < t.length) {
+    chunks.push(t.slice(i, i + chunkSize));
+    i += (chunkSize - overlap);
+  }
+  return chunks.slice(0, 18);
+}
+
+function buildWebContext(pages) {
+  const blocks = [];
+  let srcIndex = 1;
+
+  for (const p of pages) {
+    if (!p?.text) continue;
+    const title = cleanStr(p.title) || "Source";
+    const url = cleanStr(p.url);
+    const chunks = chunkText(p.text);
+    if (!chunks.length) continue;
+
+    blocks.push({
+      source_id: srcIndex,
+      title,
+      url,
+      chunk: chunks[0],
+    });
+
+    srcIndex += 1;
+    if (srcIndex > WEB_FETCH_PAGES) break;
   }
 
-  const p = safeProjectKey(project);
-  const t = cleanStr(userText);
-  const low = t.toLowerCase();
+  if (!blocks.length) return { contextText: "", sources: [] };
 
-  // Commands
-  if (low === "/memos" || low === "/memos global" || low === "/memos project") {
-    const showGlobal = (low === "/memos" || low === "/memos global");
-    const showProject = (low === "/memos" || low === "/memos project");
+  const contextText = blocks.map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nContenu:\n${b.chunk}`).join("\n\n");
+  const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
+  return { contextText, sources };
+}
 
-    let parts = [];
-    if (showGlobal) {
-      const g = getGlobalMemory();
-      parts.push("🧠 MÉMOIRE GLOBALE:");
-      parts.push(g.length ? g.slice(-60).map((m, i) => `${i + 1}. [${m.type}] ${m.text}`).join("\n") : "(vide)");
+function extractUrlsFromText(text) {
+  const t = cleanStr(text);
+  if (!t) return [];
+  const re = /\bhttps?:\/\/[^\s<>()"]+/gi;
+  const found = t.match(re) || [];
+  // nettoie fin ponctuation
+  return Array.from(new Set(found.map((u) => u.replace(/[)\].,;!?]+$/g, "")))).slice(0, 10);
+}
+
+// ==================================================
+// TIME (France)
+ // ==================================================
+function nowInFrance() {
+  return new Intl.DateTimeFormat("fr-FR", {
+    timeZone: "Europe/Paris",
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
+}
+
+// ==================================================
+// FILE GENERATION HELPERS
+// ==================================================
+function safeFileName(name, fallback) {
+  const base = cleanStr(name) || fallback;
+  return base
+    .replace(/[^\w.\- ()]/g, "_")
+    .replace(/_{2,}/g, "_")
+    .slice(0, 80);
+}
+
+function absoluteUrlFromReq(req, rel) {
+  const hostBase = `${req.protocol}://${req.get("host")}`;
+  return `${hostBase}${rel.startsWith("/") ? rel : `/${rel}`}`;
+}
+
+// Create DOCX
+async function createDocxFile({ filename, title, paragraphs }) {
+  const safe = safeFileName(filename, `document_${Date.now()}.docx`);
+  const outPath = path.join(GENERATED_DIR, safe.endsWith(".docx") ? safe : `${safe}.docx`);
+
+  const kids = [];
+  if (title) kids.push(new Paragraph({ text: cleanStr(title), heading: HeadingLevel.TITLE }));
+  const paras = Array.isArray(paragraphs) ? paragraphs : [];
+  for (const p of paras) {
+    const text = cleanStr(p);
+    if (!text) continue;
+    kids.push(new Paragraph({ children: [new TextRun(text)] }));
+  }
+  if (!kids.length) kids.push(new Paragraph(""));
+
+  const doc = new Document({ sections: [{ properties: {}, children: kids }] });
+  const buf = await Packer.toBuffer(doc);
+  fs.writeFileSync(outPath, buf);
+  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
+}
+
+// Create XLSX
+async function createXlsxFile({ filename, sheets }) {
+  const safe = safeFileName(filename, `tableur_${Date.now()}.xlsx`);
+  const outPath = path.join(GENERATED_DIR, safe.endsWith(".xlsx") ? safe : `${safe}.xlsx`);
+
+  const wb = new ExcelJS.Workbook();
+  const arr = Array.isArray(sheets) ? sheets : [{ name: "Feuille1", rows: [] }];
+
+  for (const s of arr.slice(0, 6)) {
+    const ws = wb.addWorksheet(cleanStr(s.name) || "Feuille");
+    const rows = Array.isArray(s.rows) ? s.rows : [];
+    for (const r of rows.slice(0, 2000)) ws.addRow(Array.isArray(r) ? r : [String(r)]);
+  }
+
+  await wb.xlsx.writeFile(outPath);
+  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
+}
+
+// Create PPTX
+async function createPptxFile({ filename, slides }) {
+  const safe = safeFileName(filename, `presentation_${Date.now()}.pptx`);
+  const outPath = path.join(GENERATED_DIR, safe.endsWith(".pptx") ? safe : `${safe}.pptx`);
+
+  const pptx = new PptxGenJS();
+  pptx.layout = "LAYOUT_WIDE";
+
+  const arr = Array.isArray(slides) ? slides : [];
+  if (!arr.length) {
+    const s = pptx.addSlide();
+    s.addText("Présentation", { x: 0.7, y: 0.6, w: 12, h: 1, fontSize: 34 });
+  } else {
+    for (const sl of arr.slice(0, 12)) {
+      const s = pptx.addSlide();
+      const title = cleanStr(sl.title) || "Slide";
+      s.addText(title, { x: 0.7, y: 0.5, w: 12, h: 0.8, fontSize: 30 });
+
+      const bullets = Array.isArray(sl.bullets) ? sl.bullets : [];
+      const text = bullets.map((b) => `• ${cleanStr(b)}`).filter(Boolean).join("\n");
+      if (text) s.addText(text, { x: 0.9, y: 1.5, w: 12, h: 5.0, fontSize: 18 });
     }
-    if (showProject) {
-      const pm = getProjectMemory(p);
-      parts.push(`\n🧠 MÉMOIRE PROJET "${p}":`);
-      parts.push(pm.length ? pm.slice(-60).map((m, i) => `${i + 1}. [${m.type}] ${m.text}`).join("\n") : "(vide)");
-    }
-
-    return emitSensi(p, parts.join("\n"));
   }
 
-  if (low === "/memo clear") {
-    clearProjectMemory(p);
-    return emitSensi(p, `🧠 Mémoire du projet "${p}" effacée ✅`);
-  }
-  if (low === "/memo clear global") {
-    clearGlobalMemory();
-    return emitSensi(p, "🧠 Mémoire globale effacée ✅");
-  }
+  await pptx.writeFile({ fileName: outPath });
+  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
+}
 
-  if (low.startsWith("/memo forget global ")) {
-    const q = t.slice("/memo forget global ".length);
-    const res = forgetMemoryByQuery("global", p, q);
-    return emitSensi(p, `🧠 Oubli global : ${res.removed} entrée(s) supprimée(s) ✅`);
-  }
-  if (low.startsWith("/memo forget ")) {
-    const q = t.slice("/memo forget ".length);
-    const res = forgetMemoryByQuery("project", p, q);
-    return emitSensi(p, `🧠 Oubli projet : ${res.removed} entrée(s) supprimée(s) ✅`);
-  }
+// Create PNG via OpenAI Images (best effort)
+async function createPngWithOpenAI({ prompt, filename }) {
+  if (!hasOpenAI()) throw new Error("OPENAI_API_KEY missing");
+  const client = getOpenAIClient();
 
-  // 1) Forced memo (global default)
-  const forced = extractForcedMemo(t);
-  if (forced.text) {
-    // Try LLM classification for type/confidence, but keep forced scope
+  const safe = safeFileName(filename, `image_${Date.now()}.png`);
+  const outPath = path.join(GENERATED_DIR, safe.endsWith(".png") ? safe : `${safe}.png`);
+
+  // NOTE: selon le SDK, images.generate renvoie b64_json.
+  const resp = await client.images.generate({
+    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1",
+    prompt: cleanStr(prompt).slice(0, 1500),
+    size: "1024x1024",
+  });
+
+  const b64 = resp?.data?.[0]?.b64_json;
+  if (!b64) throw new Error("Image API did not return b64_json");
+  fs.writeFileSync(outPath, Buffer.from(b64, "base64"));
+  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
+}
+
+// Dispatch create files
+async function createFilesFromPlan(plan) {
+  const created = [];
+
+  const items = Array.isArray(plan?.create_files) ? plan.create_files : [];
+  for (const it of items.slice(0, 4)) {
+    const type = cleanStr(it.type).toLowerCase();
     try {
-      const ex = await sensiExtractMemories({
-        project: p,
-        username,
-        userId,
-        userText: `mémorise: ${forced.text}`,
-      });
-
-      const items = (ex.memories || []).length
-        ? ex.memories
-        : [{ text: forced.text, type: "fact", confidence: 0.9, scope: forced.scope || "global" }];
-
-      for (const it of items) {
-        const scope = (forced.scope || it.scope || "global") === "project" ? "project" : "global";
-        addMemoryItem(scope, p, {
-          text: it.text,
-          type: it.type,
-          confidence: it.confidence,
-          authorUserId: userId,
-          authorName: username,
+      if (type === "docx") {
+        const r = await createDocxFile({
+          filename: it.filename,
+          title: it.title,
+          paragraphs: it.paragraphs,
         });
+        created.push({ ...r, kind: "docx", filename: path.basename(r.localPath) });
+      } else if (type === "xlsx") {
+        const r = await createXlsxFile({
+          filename: it.filename,
+          sheets: it.sheets,
+        });
+        created.push({ ...r, kind: "xlsx", filename: path.basename(r.localPath) });
+      } else if (type === "pptx") {
+        const r = await createPptxFile({
+          filename: it.filename,
+          slides: it.slides,
+        });
+        created.push({ ...r, kind: "pptx", filename: path.basename(r.localPath) });
+      } else if (type === "png") {
+        const r = await createPngWithOpenAI({
+          filename: it.filename,
+          prompt: it.prompt || it.description || "",
+        });
+        created.push({ ...r, kind: "png", filename: path.basename(r.localPath) });
       }
-
-      emitSensi(p, ex.ack || `🧠 OK, je mémorise (${forced.scope || "global"}) : "${forced.text}"`);
-    } catch {
-      const scope = forced.scope || "global";
-      addMemoryItem(scope === "project" ? "project" : "global", p, {
-        text: forced.text,
-        type: "fact",
-        confidence: 0.85,
-        authorUserId: userId,
-        authorName: username,
-      });
-      emitSensi(p, `🧠 OK, je mémorise (${scope}) : "${forced.text}"`);
-    }
-    return;
-  }
-
-  // 2) Smart memory extraction
-  try {
-    const ex = await sensiExtractMemories({ project: p, username, userId, userText: t });
-    const memories = Array.isArray(ex.memories) ? ex.memories : [];
-    for (const it of memories) {
-      if (!it?.text) continue;
-      const scope = (String(it.scope || "").toLowerCase() === "project") ? "project" : "global";
-      addMemoryItem(scope, p, {
-        text: it.text,
-        type: it.type || "fact",
-        confidence: it.confidence,
-        authorUserId: userId,
-        authorName: username,
-      });
-    }
-    if (ex.ack) emitSensi(p, ex.ack);
-  } catch (e) {
-    console.error("[sensi-memo]", e);
-  }
-
-  // 3) Web (heuristic)
-  let webBlock = "";
-  if (hasWeb() && mightNeedWeb(t)) {
-    try {
-      const results = await serperSearch(t, 6);
-      webBlock = `\n\n[WEB RESULTS]\n${formatSearchResults(results)}\n[/WEB RESULTS]\n`;
     } catch (e) {
-      console.error("[serper]", e);
-      webBlock = `\n\n[WEB RESULTS]\n(Erreur web search)\n[/WEB RESULTS]\n`;
+      console.error("[create-file]", type, e);
+      created.push({ kind: type || "file", error: String(e?.message || e) });
     }
   }
 
-  // 4) Prompt with memory + recent
-  const mem = formatMemoryForPrompt(p);
-  const recent = getHistory(p).slice(-20);
-  const recentTxt = recent
-    .map((m) => `${cleanStr(m?.username) || "??"}: ${cleanStr(m?.message)}`)
-    .join("\n");
-
-  const system = `
-Tu es Sensi, IA d'assistance au travail collaboratif.
-Tu as accès à une mémoire GLOBALE (partagée entre tous les projets) et une mémoire PROJET (spécifique au projet courant).
-Priorité: si conflit, la mémoire PROJET prime.
-
-Règles:
-- Réponds en français, clair, concret.
-- Utilise la mémoire pour être cohérente et "comprendre" les relations (ex: qui est Mel).
-- Si [WEB RESULTS] est présent, utilise-les et cite les sources (titres + URLs).
-- N'invente pas de mémoires.
-`.trim();
-
-  const user = `
-[PROJET]
-${p}
-[/PROJET]
-
-[MÉMOIRE GLOBALE]
-${mem.gTxt}
-[/MÉMOIRE GLOBALE]
-
-[MÉMOIRE PROJET]
-${mem.pTxt}
-[/MÉMOIRE PROJET]
-
-[CONTEXTE RÉCENT]
-${recentTxt || "(vide)"}
-[/CONTEXTE RÉCENT]
-
-[QUESTION UTILISATEUR]
-${t}
-[/QUESTION UTILISATEUR]
-${webBlock}
-`.trim();
-
-  const answer = await openaiText({ system, user, maxTokens: 620 });
-  if (answer) emitSensi(p, answer);
+  return created;
 }
 
-/* ==================================================
-   FILE ANALYSIS (simple)
-================================================== */
+// ==================================================
+// FILE ANALYSIS (upload) — docs + images
+// ==================================================
 async function extractTextFromFile(localFilePath, mimetype, originalName) {
   const ext = (path.extname(originalName || "") || "").toLowerCase();
 
   if (mimetype.startsWith("text/") || [".txt", ".md", ".csv"].includes(ext)) {
     const raw = fs.readFileSync(localFilePath, "utf8");
-    return raw.slice(0, 12000);
+    return raw.slice(0, 18000);
   }
 
   if (mimetype === "application/pdf" || ext === ".pdf") {
@@ -763,16 +681,22 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
       const pdfParse = require("pdf-parse");
       const buf = fs.readFileSync(localFilePath);
       const out = await pdfParse(buf);
-      return String(out?.text || "").slice(0, 12000);
-    } catch { return ""; }
+      return String(out?.text || "").slice(0, 18000);
+    } catch (e) {
+      console.error("[pdf-parse]", e);
+      return "";
+    }
   }
 
   if (ext === ".docx") {
     try {
       const mammoth = require("mammoth");
       const result = await mammoth.extractRawText({ path: localFilePath });
-      return String(result?.value || "").slice(0, 12000);
-    } catch { return ""; }
+      return String(result?.value || "").slice(0, 18000);
+    } catch (e) {
+      console.error("[mammoth]", e);
+      return "";
+    }
   }
 
   if (ext === ".xlsx") {
@@ -783,8 +707,11 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
       if (!sheetName) return "";
       const ws = wb.Sheets[sheetName];
       const csv = XLSX.utils.sheet_to_csv(ws);
-      return String(csv || "").slice(0, 12000);
-    } catch { return ""; }
+      return String(csv || "").slice(0, 18000);
+    } catch (e) {
+      console.error("[xlsx-read]", e);
+      return "";
+    }
   }
 
   return "";
@@ -796,27 +723,310 @@ async function analyzeFileWithSensi({ project, username, attachment }) {
     return;
   }
 
+  const client = getOpenAIClient();
   const isImage = String(attachment.mimetype || "").startsWith("image/");
   const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
 
   let extracted = "";
   if (!isImage) extracted = await extractTextFromFile(localPath, attachment.mimetype, attachment.filename);
 
-  const system = `Tu es Sensi. Analyse le fichier et propose résumé + points clés + actions.`;
-  const user =
-    `Fichier envoyé par "${username}" dans "${project}".\n` +
-    `Nom: ${attachment.filename}\nType: ${attachment.mimetype}\n` +
-    (isImage ? `Image URL: ${attachment.url}` : `Extrait:\n${extracted || "(pas d'extraction dispo)"}`);
+  const system = `
+Tu es Sensi.
+Tu reçois un fichier uploadé dans un projet.
 
-  const out = await openaiText({ system, user, maxTokens: 520 });
+Tâches:
+1) Résumer (3-8 lignes)
+2) Points clés (bullet points)
+3) Actions recommandées (3-8)
+4) Si image: décrire précisément ce que tu vois (et si document scanné: extraire ce que tu peux).
+
+Réponds en français, concret.
+`.trim();
+
+  const parts = [];
+  parts.push({
+    type: "text",
+    text:
+      `Projet: ${project}\nAuteur upload: ${username}\n` +
+      `Fichier: ${attachment.filename}\nType: ${attachment.mimetype}\nURL: ${attachment.url}\n\n` +
+      (isImage ? `Analyse l'image via son URL.` : `Extrait (si dispo):\n${extracted || "(pas d'extraction dispo)"}\n`),
+  });
+
+  if (isImage) {
+    parts.push({ type: "image_url", image_url: { url: attachment.url } });
+  }
+
+  const completion = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: parts },
+    ],
+    temperature: 0.2,
+    max_tokens: 800,
+  });
+
+  const out = cleanStr(completion?.choices?.[0]?.message?.content);
   if (out) emitSensi(project, `🧠 Analyse Sensi — ${attachment.filename}\n\n${out}`);
 }
 
-/* ==================================================
-   SOCKET.IO
-================================================== */
-const presence = new Map();
+// ==================================================
+// SENSI ULTRA: WEB ANY + FILE CREATION PLAN + MEMORY EXTRACTION
+// ==================================================
+async function maybeExtractAndStoreMemory({ project, username, userText }) {
+  const t = cleanStr(userText);
+  if (!t) return;
+  if (!/(m[ée]morise|souviens[- ]toi|note\s+que|garde\s+en\s+t[êe]te|remember)/i.test(t)) return;
+  if (!hasOpenAI()) return;
 
+  const client = getOpenAIClient();
+  const sys = `
+Tu es un extracteur de faits à mémoriser.
+Retourne uniquement un JSON STRICT.
+
+But:
+- Extraire 1 à 5 faits stables et utiles à long terme.
+- Phrases courtes, affirmatives.
+- Ne pas inventer.
+Si rien: {"facts":[]}
+
+Format: {"facts":["...","..."]}
+`.trim();
+
+  const completion = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: [{ role: "system", content: sys }, { role: "user", content: `Message: ${t}` }],
+    temperature: 0,
+    max_tokens: 220,
+  });
+
+  const raw = cleanStr(completion?.choices?.[0]?.message?.content);
+  if (!raw) return;
+
+  let parsed = null;
+  try { parsed = JSON.parse(raw); }
+  catch {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
+  }
+  if (!parsed || !Array.isArray(parsed.facts)) return;
+
+  const added = [];
+  for (const f of parsed.facts.slice(0, 5)) {
+    const ok = addGlobalFact({ text: f, who: username, project });
+    if (ok) added.push(normalizeFactText(f));
+  }
+  if (added.length) emitSensi(project, `🧠 Mémoire globale mise à jour ✅\n- ${added.join("\n- ")}`);
+}
+
+// === Actions Plan extraction (création de fichiers) ===
+function stripActionBlock(text) {
+  // Extrait bloc ```json ... ``` contenant "create_files"
+  const t = cleanStr(text);
+  const re = /```json\s*([\s\S]*?)\s*```/i;
+  const m = t.match(re);
+  if (!m) return { cleanText: t, plan: null };
+  const jsonRaw = m[1];
+  let plan = null;
+  try { plan = JSON.parse(jsonRaw); } catch { plan = null; }
+  const cleanText = t.replace(m[0], "").trim();
+  return { cleanText, plan };
+}
+
+async function buildWebBundle(userText) {
+  // "any info": 1) si URLs -> on les ouvre
+  // 2) si SERPER -> on cherche
+  const urls = extractUrlsFromText(userText);
+  const pages = [];
+
+  // URLs directes (priorité)
+  for (const u of urls.slice(0, 4)) {
+    const page = await extractReadableTextFromUrl(u);
+    if (page.ok && page.text) pages.push(page);
+  }
+
+  // recherche (si dispo)
+  if (hasWeb()) {
+    const results = await serperSearch(userText, Math.max(6, Math.min(WEB_MAX_RESULTS, 12)));
+    const links = results.map((r) => r.link).filter(Boolean);
+    for (const u of links.slice(0, WEB_FETCH_PAGES)) {
+      // évite doublons URL directes
+      if (urls.includes(u)) continue;
+      const page = await extractReadableTextFromUrl(u);
+      if (page.ok && page.text) pages.push(page);
+    }
+  }
+
+  const built = buildWebContext(pages);
+  return built; // {contextText, sources}
+}
+
+async function sensiAnswer({ project, username, userText, reqForAbsoluteUrls = null }) {
+  if (!hasOpenAI()) {
+    emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
+    return;
+  }
+
+  // heure France (local, fiable)
+  const low = cleanStr(userText).toLowerCase();
+  if (/quelle\s+heure|heure\s+est[- ]il/i.test(low) && /(france|paris|fr)\b/i.test(low)) {
+    emitSensi(project, `🕒 En France (Europe/Paris), nous sommes : **${nowInFrance()}**.`);
+    return;
+  }
+
+  const client = getOpenAIClient();
+  const memBlock = renderMemoryBlock();
+
+  // WEB ANY: si SERPER ou URLs
+  let webContext = "";
+  let sources = [];
+  try {
+    const shouldWeb = hasWeb() || extractUrlsFromText(userText).length > 0;
+    if (shouldWeb) {
+      const built = await buildWebBundle(userText);
+      webContext = built.contextText || "";
+      sources = built.sources || [];
+    }
+  } catch (e) {
+    console.error("[web-any]", e);
+    webContext = "";
+    sources = [];
+  }
+
+  // IMPORTANT: on demande au modèle de retourner éventuellement un plan JSON de création de fichiers.
+  // => pas de tool-calling: juste un bloc ```json {...}``` qu'on parse.
+  const system = `
+Tu es Sensi, IA d’assistance ultra-performante dans un chat collaboratif.
+
+Tu peux:
+- Répondre aux questions.
+- Exploiter un "Contexte WEB" fourni (extraits de pages) pour répondre avec des sources.
+- Exploiter la "Mémoire globale" (faits persistants cross-projets).
+- Proposer la création de fichiers (DOCX/XLSX/PPTX/PNG) quand c’est utile.
+
+RÈGLES:
+1) Réponds en français, clair, concret.
+2) Si tu utilises le Contexte WEB, ajoute une section "Sources" (URLs) à la fin.
+3) Ne fabrique pas de sources.
+4) Si tu veux créer des fichiers, AJOUTE À LA FIN un bloc unique:
+
+\`\`\`json
+{
+  "create_files": [
+    {
+      "type": "docx|xlsx|pptx|png",
+      "filename": "nom_fichier.ext",
+      "title": "optionnel",
+      "paragraphs": ["..."]               // docx
+      // OU
+      "sheets": [{"name":"Feuille1","rows":[["A","B"],[1,2]]}]  // xlsx
+      // OU
+      "slides": [{"title":"Slide 1","bullets":["...","..."]}]   // pptx
+      // OU
+      "prompt": "description détaillée image"                   // png
+    }
+  ]
+}
+\`\`\`
+
+- Maximum 4 fichiers.
+- Le JSON doit être STRICT (valide).
+- Si tu ne veux pas créer de fichier: ne mets pas de bloc JSON.
+`.trim();
+
+  const user = `
+Projet: ${project}
+Auteur: ${username}
+Message: ${userText}
+
+Mémoire globale (faits):
+${memBlock}
+
+${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
+`.trim();
+
+  const completion = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    temperature: 0.2,
+    max_tokens: 900,
+  });
+
+  const rawOut = cleanStr(completion?.choices?.[0]?.message?.content);
+  if (!rawOut) {
+    emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
+    return;
+  }
+
+  const { cleanText, plan } = stripActionBlock(rawOut);
+
+  // 1) message normal
+  let final = cleanText;
+
+  // Ajoute sources si webContext & sources (si pas déjà)
+  if (webContext && sources.length && !/(?:^|\n)Sources\s*:/i.test(final)) {
+    final += `\n\nSources:\n` + sources.map((s) => `- ${s.title} — ${s.url}`).join("\n");
+  }
+
+  if (final) emitSensi(project, final);
+
+  // 2) création fichiers si plan demandé
+  if (plan?.create_files?.length) {
+    emitSensi(project, "🛠️ Création de fichier(s) en cours…");
+
+    const created = await createFilesFromPlan(plan);
+
+    for (const c of created) {
+      if (c.error) {
+        emitSensi(project, `⚠️ Fichier (${c.kind}) non créé: ${c.error}`);
+        continue;
+      }
+      // poste en pièce jointe dans le chat
+      const attachment = {
+        url: (reqForAbsoluteUrls ? absoluteUrlFromReq(reqForAbsoluteUrls, c.relUrl) : c.relUrl),
+        path: c.relUrl,
+        filename: c.filename,
+        mimetype:
+          c.kind === "docx" ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" :
+          c.kind === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" :
+          c.kind === "pptx" ? "application/vnd.openxmlformats-officedocument.presentationml.presentation" :
+          c.kind === "png" ? "image/png" : "application/octet-stream",
+      };
+
+      const msg = {
+        id: Date.now(),
+        ts: Date.now(),
+        project,
+        username: "Sensi",
+        userId: "sensi",
+        message: `📦 Fichier généré : ${attachment.filename}`,
+        attachment,
+      };
+
+      pushMessage(project, {
+        id: msg.id,
+        ts: msg.ts,
+        username: msg.username,
+        userId: msg.userId,
+        message: msg.message,
+        attachment: msg.attachment,
+      });
+
+      io.to(project).emit("chatMessage", msg);
+    }
+  }
+
+  // 3) mémoire globale si demandé
+  await maybeExtractAndStoreMemory({ project, username, userText }).catch(() => {});
+}
+
+// ==================================================
+// PRESENCE + SOCKET EVENTS
+// ==================================================
+const presence = new Map(); // project -> Map(socketId -> {username,userId})
 function getUsers(project) {
   const map = presence.get(project);
   if (!map) return [];
@@ -833,16 +1043,19 @@ io.on("connection", (socket) => {
   console.log("Socket connected:", socket.id);
   socket.data.userId = "";
   socket.data.username = "";
+  socket.data.project = "";
 
   socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
 
   socket.on("createProject", ({ name }) => {
     const n = cleanStr(name);
-    if (!isValidProjectName(n)) return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
+    if (!isValidProjectName(n)) {
+      return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
+    }
     if (projects.includes(n)) return socket.emit("projectError", { message: "Projet déjà existant." });
     projects.push(n);
     projects = Array.from(new Set(projects));
-    saveProjects();
+    saveProjectsNow();
     broadcastProjects();
   });
 
@@ -853,15 +1066,14 @@ io.on("connection", (socket) => {
     if (projects.length <= 1) return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
 
     io.to(p).emit("projectDeleted", { project: p });
+
     if (historyByProject[p]) delete historyByProject[p];
-    if (memoryByProject[p]) delete memoryByProject[p];
     if (presence.has(p)) presence.delete(p);
 
     projects = projects.filter((x) => x !== p);
-    if (projects.length === 0) projects = ["Ever"];
-    saveProjects();
-    saveHistoryNow();
-    saveMemoryProjectNow();
+    if (projects.length === 0) projects = ["test"];
+    saveProjectsNow();
+    writeJSON(HISTORY_FILE, historyByProject);
     broadcastProjects();
   });
 
@@ -880,6 +1092,7 @@ io.on("connection", (socket) => {
 
     socket.data.userId = uid;
     socket.data.username = u;
+    socket.data.project = p;
 
     socket.join(p);
 
@@ -891,7 +1104,7 @@ io.on("connection", (socket) => {
     emitSystem(p, `👋 ${u} a rejoint ${p}`);
   });
 
-  socket.on("chatMessage", ({ project, username, userId, message }) => {
+  socket.on("chatMessage", async ({ project, username, userId, message }) => {
     const p = safeProjectKey(project);
     const u = cleanStr(username) || socket.data.username || "Anonyme";
     const uid = cleanStr(userId) || socket.data.userId;
@@ -902,14 +1115,16 @@ io.on("connection", (socket) => {
     if (!uid) return;
 
     const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, userId: uid, message: m };
-
     pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
     io.to(p).emit("chatMessage", msg);
 
-    sensiRespondToUserMessage({ project: p, username: u, userId: uid, userText: m }).catch((e) => {
+    try {
+      // on passe req null: les urls générées restent relatives; c'est OK car client est sur même host
+      await sensiAnswer({ project: p, username: u, userText: m, reqForAbsoluteUrls: null });
+    } catch (e) {
       console.error("[sensi-auto]", e);
       emitSensi(p, "⚠️ Erreur Sensi (voir logs).");
-    });
+    }
   });
 
   socket.on("deleteMessage", ({ project, messageId, userId }) => {
@@ -939,19 +1154,18 @@ io.on("connection", (socket) => {
   });
 });
 
-/* ==================================================
-   START
-================================================== */
+// ==================================================
+// PROCESS + START
+// ==================================================
 process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
 process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 
 process.on("SIGTERM", () => {
   console.warn("[SIGTERM] shutting down");
   try {
-    saveProjects();
-    saveHistoryNow();
-    saveMemoryProjectNow();
-    saveMemoryGlobalNow();
+    saveProjectsNow();
+    writeJSON(HISTORY_FILE, historyByProject);
+    saveMemoryNow();
   } catch (_) {}
   server.close(() => process.exit(0));
 });
