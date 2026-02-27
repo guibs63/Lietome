@@ -1,5 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v2 (Railway-safe) ✅
-// Fix: "ReferenceError: express is not defined" + no-cache index/client
+// guibs:/server.js (COMPLET) — ULTRA v3.1 (Railway-safe, URL-only web + audio upload + auto-transcript message) ✅
 "use strict";
 
 const express = require("express");
@@ -50,9 +49,9 @@ const PptxGenJS = pptxPkg || null;
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json({ limit: "3mb" }));
+app.use(express.json({ limit: "6mb" }));
 
-// ✅ anti-cache Railway (évite client.js/index.html "vieux" après deploy)
+// ✅ anti-cache Railway
 app.get("/", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();
@@ -67,7 +66,7 @@ app.use(express.static(__dirname));
 // ==================================================
 // CONFIG
 // ==================================================
-const APP_VERSION = process.env.APP_VERSION || "ultra-v2-web-any-create-files";
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.1-audio-over-fft";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
@@ -76,25 +75,26 @@ const UPLOADS_DIR = path.join(__dirname, "uploads");
 const GENERATED_DIR = path.join(__dirname, "generated");
 
 const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 350);
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 25);
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 40);
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 // IA
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2-chat-latest";
+const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// WEB provider (Serper)
-const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
-const SERPER_ENDPOINT = "https://google.serper.dev/search";
-
-// Web behavior
-const WEB_MAX_RESULTS = Number(process.env.WEB_MAX_RESULTS || 10);
-const WEB_FETCH_PAGES = Number(process.env.WEB_FETCH_PAGES || 6);
+// Web behavior (URL-only)
 const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
 const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
 
 // Cache
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
+
+// ✅ Audio: auto-poster la transcription comme message utilisateur
+const AUDIO_AUTO_TRANSCRIPT_MESSAGE = String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
+const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr"; // "fr" conseillé vu ton usage
+const AUDIO_TRANSCRIPT_PREFIX = process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
 
 // ==================================================
 // INIT DIRS
@@ -131,9 +131,7 @@ function safeProjectKey(project) {
 function isValidProjectName(name) {
   return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
 }
-
 function hasOpenAI() { return Boolean(OPENAI_API_KEY); }
-function hasWeb() { return Boolean(SERPER_API_KEY); }
 function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
 
 // ==================================================
@@ -222,7 +220,6 @@ app.get("/health", (req, res) => {
     time: new Date().toISOString(),
     version: APP_VERSION,
     ai: hasOpenAI() ? "enabled" : "disabled",
-    web: hasWeb() ? "enabled" : "disabled",
     deps: {
       jsdom: Boolean(JSDOM),
       readability: Boolean(Readability),
@@ -230,10 +227,19 @@ app.get("/health", (req, res) => {
       exceljs: Boolean(ExcelJS),
       pptxgenjs: Boolean(PptxGenJS),
     },
+    models: {
+      chat: OPENAI_MODEL,
+      transcribe: OPENAI_TRANSCRIBE_MODEL,
+      image: OPENAI_IMAGE_MODEL,
+    },
+    web: "url-only (no search provider)",
+    audio: {
+      autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE,
+      language: AUDIO_TRANSCRIPT_LANGUAGE,
+    },
   });
 });
 
-// NOTE: "/" est servi par express.static (index.html) — pas besoin de res.sendFile
 app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 // ==================================================
@@ -243,8 +249,15 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
 // ==================================================
-// UPLOAD
+// FILE HELPERS
 // ==================================================
+function isTextLikeExt(ext) {
+  return [".txt", ".md", ".csv", ".log", ".json", ".yaml", ".yml"].includes(ext);
+}
+function isAudioLike(mimetype, ext) {
+  if (mimetype && mimetype.startsWith("audio/")) return true;
+  return [".mp3", ".wav", ".m4a", ".aac", ".ogg", ".webm", ".flac", ".mp4", ".mka"].includes(ext);
+}
 function extFromMime(mime, originalName) {
   const fallback = path.extname(originalName || "").slice(0, 10);
   if (fallback) return fallback;
@@ -254,9 +267,22 @@ function extFromMime(mime, originalName) {
   if (mime === "image/webp") return ".webp";
   if (mime === "application/pdf") return ".pdf";
   if (mime === "text/plain") return ".txt";
+
+  // audio: essaye d’être propre
+  if (mime === "audio/webm") return ".webm";
+  if (mime === "audio/ogg") return ".ogg";
+  if (mime === "audio/mpeg") return ".mp3";
+  if (mime === "audio/wav") return ".wav";
+  if (mime === "audio/x-wav") return ".wav";
+  if (mime === "audio/mp4") return ".m4a";
+  if (mime && mime.startsWith("audio/")) return ".audio";
+
   return "";
 }
 
+// ==================================================
+// UPLOAD (files + audio) + AUTO-TRANSCRIPT MESSAGE
+// ==================================================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => {
@@ -289,10 +315,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       path: `/uploads/${req.file.filename}`,
       filename: req.file.originalname,
       storedAs: req.file.filename,
-      mimetype: req.file.mimetype,
+      mimetype: req.file.mimetype || "application/octet-stream",
       size: req.file.size,
     };
 
+    // 1) message "pièce jointe" (comme avant)
     const msg = {
       id: Date.now(),
       ts: Date.now(),
@@ -314,9 +341,74 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     io.to(project).emit("chatMessage", msg);
 
-    // best effort analysis
-    analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+    // 2) si audio => transcription => poste un message texte (même auteur) + déclenche Sensi dessus
+    const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
+    const isAudio = isAudioLike(String(attachment.mimetype || ""), ext);
 
+    if (isAudio && AUDIO_AUTO_TRANSCRIPT_MESSAGE) {
+      const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
+
+      // transcription en asynchrone (mais on reste dans la requête — pas de background “plus tard” côté user)
+      // => on renvoie OK upload tout de suite, puis on poste la transcription via socket dès prête.
+      (async () => {
+        try {
+          const transcript = await transcribeAudioFile(localPath);
+          const t = cleanStr(transcript);
+          if (!t) {
+            io.to(project).emit("systemMessage", {
+              id: Date.now(),
+              ts: Date.now(),
+              project,
+              text: `🎙️ Audio reçu (${attachment.filename}) — transcription indisponible.`,
+            });
+            // on lance quand même l'analyse fichier (qui dira "transcription vide")
+            analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+            return;
+          }
+
+          // poste la transcription comme message utilisateur (pratique pour "OVER" / workflows)
+          const tMsg = {
+            id: Date.now(),
+            ts: Date.now(),
+            project,
+            username,
+            userId,
+            message: `${AUDIO_TRANSCRIPT_PREFIX}${t}`,
+            meta: { kind: "audio_transcript", attachmentUrl: attachment.url, attachmentName: attachment.filename },
+          };
+
+          pushMessage(project, {
+            id: tMsg.id,
+            ts: tMsg.ts,
+            username: tMsg.username,
+            userId: tMsg.userId,
+            message: tMsg.message,
+            meta: tMsg.meta,
+          });
+
+          io.to(project).emit("chatMessage", tMsg);
+
+          // Sensi répond sur la transcription (comme si l’utilisateur avait écrit)
+          try {
+            await sensiAnswer({ project, username, userText: t });
+          } catch (e) {
+            console.error("[sensi-audio-transcript]", e);
+            emitSensi(project, "⚠️ Erreur Sensi lors de l’analyse de la transcription (voir logs).");
+          }
+
+          // analyse fichier Sensi (résumé + actions) en plus (optionnel)
+          analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+        } catch (e) {
+          console.error("[audio-transcript-flow]", e);
+          analyzeFileWithSensi({ project, username, attachment }).catch((er) => console.error("[sensi-file]", er));
+        }
+      })();
+    } else {
+      // analyse fichier standard
+      analyzeFileWithSensi({ project, username, attachment }).catch((e) => console.error("[sensi-file]", e));
+    }
+
+    // réponse HTTP immédiate (upload OK)
     res.json({ ok: true, project, attachment });
   } catch (e) {
     console.error("[upload]", e);
@@ -378,7 +470,7 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
 }
 
 // ==================================================
-// WEB: CACHE + SEARCH + URL OPEN
+// URL-ONLY WEB: CACHE + URL OPEN
 // ==================================================
 const cache = new Map(); // key -> { ts, data }
 function cacheGet(key) {
@@ -394,39 +486,6 @@ function cacheSet(key, data) {
   cache.set(key, { ts: Date.now(), data });
 }
 
-async function serperSearch(query, num = 10) {
-  if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY missing");
-  const q = cleanStr(query);
-  if (!q) return [];
-
-  const cacheKey = `serper:${q}:${num}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  const resp = await fetch(SERPER_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "X-API-KEY": SERPER_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ q, num }),
-  });
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`Serper error: ${resp.status} ${t}`);
-  }
-
-  const data = await resp.json();
-  const items = [];
-  for (const r of (data?.organic || []).slice(0, num)) {
-    items.push({ title: r.title || "", link: r.link || "", snippet: r.snippet || "" });
-  }
-
-  cacheSet(cacheKey, items);
-  return items;
-}
-
 async function fetchWithTimeout(url, ms) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -436,7 +495,7 @@ async function fetchWithTimeout(url, ms) {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/2.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.1)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
@@ -482,14 +541,12 @@ async function extractReadableTextFromUrl(url) {
     const ct = resp.headers.get("content-type") || "";
     const raw = await resp.text().catch(() => "");
 
-    // Non HTML -> return as text
     if (!ct.includes("text/html")) {
       const out = { ok: true, url: u, title: "", text: cleanExtractedText(raw) };
       cacheSet(cacheKey, out);
       return out;
     }
 
-    // No jsdom/readability -> degrade
     if (!JSDOM || !Readability) {
       const out = { ok: true, url: u, title: "", text: naiveHtmlToText(raw) };
       cacheSet(cacheKey, out);
@@ -522,7 +579,7 @@ function chunkText(text, chunkSize = 1400, overlap = 180) {
     chunks.push(t.slice(i, i + chunkSize));
     i += (chunkSize - overlap);
   }
-  return chunks.slice(0, 18);
+  return chunks.slice(0, 12);
 }
 
 function buildWebContext(pages) {
@@ -544,7 +601,7 @@ function buildWebContext(pages) {
     });
 
     srcIndex += 1;
-    if (srcIndex > WEB_FETCH_PAGES) break;
+    if (srcIndex > 6) break;
   }
 
   if (!blocks.length) return { contextText: "", sources: [] };
@@ -580,141 +637,18 @@ function nowInFrance() {
 }
 
 // ==================================================
-// FILE GENERATION HELPERS
-// ==================================================
-function safeFileName(name, fallback) {
-  const base = cleanStr(name) || fallback;
-  return base.replace(/[^\w.\- ()]/g, "_").replace(/_{2,}/g, "_").slice(0, 80);
-}
-
-// DOCX
-async function createDocxFile({ filename, title, paragraphs }) {
-  if (!Document || !Packer || !Paragraph || !HeadingLevel || !TextRun) {
-    throw new Error("docx package missing (install 'docx')");
-  }
-  const safe = safeFileName(filename, `document_${Date.now()}.docx`);
-  const outPath = path.join(GENERATED_DIR, safe.endsWith(".docx") ? safe : `${safe}.docx`);
-
-  const kids = [];
-  if (title) kids.push(new Paragraph({ text: cleanStr(title), heading: HeadingLevel.TITLE }));
-  const paras = Array.isArray(paragraphs) ? paragraphs : [];
-  for (const p of paras) {
-    const text = cleanStr(p);
-    if (!text) continue;
-    kids.push(new Paragraph({ children: [new TextRun(text)] }));
-  }
-  if (!kids.length) kids.push(new Paragraph(""));
-
-  const doc = new Document({ sections: [{ properties: {}, children: kids }] });
-  const buf = await Packer.toBuffer(doc);
-  fs.writeFileSync(outPath, buf);
-  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
-}
-
-// XLSX
-async function createXlsxFile({ filename, sheets }) {
-  if (!ExcelJS) throw new Error("exceljs package missing (install 'exceljs')");
-  const safe = safeFileName(filename, `tableur_${Date.now()}.xlsx`);
-  const outPath = path.join(GENERATED_DIR, safe.endsWith(".xlsx") ? safe : `${safe}.xlsx`);
-
-  const wb = new ExcelJS.Workbook();
-  const arr = Array.isArray(sheets) ? sheets : [{ name: "Feuille1", rows: [] }];
-
-  for (const s of arr.slice(0, 6)) {
-    const ws = wb.addWorksheet(cleanStr(s.name) || "Feuille");
-    const rows = Array.isArray(s.rows) ? s.rows : [];
-    for (const r of rows.slice(0, 2000)) ws.addRow(Array.isArray(r) ? r : [String(r)]);
-  }
-
-  await wb.xlsx.writeFile(outPath);
-  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
-}
-
-// PPTX
-async function createPptxFile({ filename, slides }) {
-  if (!PptxGenJS) throw new Error("pptxgenjs package missing (install 'pptxgenjs')");
-  const safe = safeFileName(filename, `presentation_${Date.now()}.pptx`);
-  const outPath = path.join(GENERATED_DIR, safe.endsWith(".pptx") ? safe : `${safe}.pptx`);
-
-  const pptx = new PptxGenJS();
-  pptx.layout = "LAYOUT_WIDE";
-
-  const arr = Array.isArray(slides) ? slides : [];
-  if (!arr.length) {
-    const s = pptx.addSlide();
-    s.addText("Présentation", { x: 0.7, y: 0.6, w: 12, h: 1, fontSize: 34 });
-  } else {
-    for (const sl of arr.slice(0, 12)) {
-      const s = pptx.addSlide();
-      const title = cleanStr(sl.title) || "Slide";
-      s.addText(title, { x: 0.7, y: 0.5, w: 12, h: 0.8, fontSize: 30 });
-
-      const bullets = Array.isArray(sl.bullets) ? sl.bullets : [];
-      const text = bullets.map((b) => `• ${cleanStr(b)}`).filter(Boolean).join("\n");
-      if (text) s.addText(text, { x: 0.9, y: 1.5, w: 12, h: 5.0, fontSize: 18 });
-    }
-  }
-
-  await pptx.writeFile({ fileName: outPath });
-  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
-}
-
-// PNG (OpenAI Images)
-async function createPngWithOpenAI({ prompt, filename }) {
-  if (!hasOpenAI()) throw new Error("OPENAI_API_KEY missing");
-  const client = getOpenAIClient();
-
-  const safe = safeFileName(filename, `image_${Date.now()}.png`);
-  const outPath = path.join(GENERATED_DIR, safe.endsWith(".png") ? safe : `${safe}.png`);
-
-  const resp = await client.images.generate({
-    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1",
-    prompt: cleanStr(prompt).slice(0, 1500),
-    size: "1024x1024",
-  });
-
-  const b64 = resp?.data?.[0]?.b64_json;
-  if (!b64) throw new Error("Image API did not return b64_json");
-  fs.writeFileSync(outPath, Buffer.from(b64, "base64"));
-  return { localPath: outPath, relUrl: `/generated/${encodeURIComponent(path.basename(outPath))}` };
-}
-
-async function createFilesFromPlan(plan) {
-  const created = [];
-  const items = Array.isArray(plan?.create_files) ? plan.create_files : [];
-  for (const it of items.slice(0, 4)) {
-    const type = cleanStr(it.type).toLowerCase();
-    try {
-      if (type === "docx") {
-        const r = await createDocxFile({ filename: it.filename, title: it.title, paragraphs: it.paragraphs });
-        created.push({ ...r, kind: "docx", filename: path.basename(r.localPath) });
-      } else if (type === "xlsx") {
-        const r = await createXlsxFile({ filename: it.filename, sheets: it.sheets });
-        created.push({ ...r, kind: "xlsx", filename: path.basename(r.localPath) });
-      } else if (type === "pptx") {
-        const r = await createPptxFile({ filename: it.filename, slides: it.slides });
-        created.push({ ...r, kind: "pptx", filename: path.basename(r.localPath) });
-      } else if (type === "png") {
-        const r = await createPngWithOpenAI({ filename: it.filename, prompt: it.prompt || it.description || "" });
-        created.push({ ...r, kind: "png", filename: path.basename(r.localPath) });
-      }
-    } catch (e) {
-      console.error("[create-file]", type, e);
-      created.push({ kind: type || "file", error: String(e?.message || e) });
-    }
-  }
-  return created;
-}
-
-// ==================================================
-// FILE ANALYSIS (upload) — docs + images
+// FILE ANALYSIS (docs + images + audio)
 // ==================================================
 async function extractTextFromFile(localFilePath, mimetype, originalName) {
   const ext = (path.extname(originalName || "") || "").toLowerCase();
 
-  if (mimetype.startsWith("text/") || [".txt", ".md", ".csv"].includes(ext)) {
-    const raw = fs.readFileSync(localFilePath, "utf8");
-    return raw.slice(0, 18000);
+  if ((mimetype && mimetype.startsWith("text/")) || isTextLikeExt(ext)) {
+    try {
+      const raw = fs.readFileSync(localFilePath, "utf8");
+      return raw.slice(0, 18000);
+    } catch {
+      return "";
+    }
   }
 
   if (mimetype === "application/pdf" || ext === ".pdf") {
@@ -761,6 +695,24 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
   return "";
 }
 
+async function transcribeAudioFile(localFilePath) {
+  if (!hasOpenAI()) return "";
+  const client = getOpenAIClient();
+  try {
+    const file = fs.createReadStream(localFilePath);
+    const resp = await client.audio.transcriptions.create({
+      model: OPENAI_TRANSCRIBE_MODEL,
+      file,
+      language: AUDIO_TRANSCRIPT_LANGUAGE,
+    });
+    const text = cleanStr(resp?.text || "");
+    return text.slice(0, 18000);
+  } catch (e) {
+    console.error("[transcribe]", e);
+    return "";
+  }
+}
+
 async function analyzeFileWithSensi({ project, username, attachment }) {
   if (!hasOpenAI()) {
     emitSensi(project, `ℹ️ IA non configurée. Fichier reçu : ${attachment.filename}`);
@@ -768,11 +720,19 @@ async function analyzeFileWithSensi({ project, username, attachment }) {
   }
 
   const client = getOpenAIClient();
-  const isImage = String(attachment.mimetype || "").startsWith("image/");
+  const mimetype = String(attachment.mimetype || "application/octet-stream");
+  const isImage = mimetype.startsWith("image/");
+  const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
+  const isAudio = isAudioLike(mimetype, ext);
+
   const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
 
   let extracted = "";
-  if (!isImage) extracted = await extractTextFromFile(localPath, attachment.mimetype, attachment.filename);
+  if (isAudio) {
+    extracted = await transcribeAudioFile(localPath);
+  } else if (!isImage) {
+    extracted = await extractTextFromFile(localPath, mimetype, attachment.filename);
+  }
 
   const system = `
 Tu es Sensi.
@@ -782,8 +742,12 @@ Tâches:
 1) Résumer (3-8 lignes)
 2) Points clés (bullet points)
 3) Actions recommandées (3-8)
-4) Si image: décrire précisément ce que tu vois (et si document scanné: extraire ce que tu peux).
+4) Si image: décrire précisément ce que tu vois.
+5) Si audio: résume la transcription + extrait les décisions/actions.
 
+IMPORTANT:
+- Si tu n'as AUCUN contenu exploitable (extraction/transcription vide), dis-le clairement en 1 phrase,
+  puis propose 3 actions concrètes (ex: ré-uploader, autre format).
 Réponds en français, concret.
 `.trim();
 
@@ -792,8 +756,12 @@ Réponds en français, concret.
     type: "text",
     text:
       `Projet: ${project}\nAuteur upload: ${username}\n` +
-      `Fichier: ${attachment.filename}\nType: ${attachment.mimetype}\nURL: ${attachment.url}\n\n` +
-      (isImage ? `Analyse l'image via son URL.` : `Extrait (si dispo):\n${extracted || "(pas d'extraction dispo)"}\n`),
+      `Fichier: ${attachment.filename}\nType: ${mimetype}\nURL: ${attachment.url}\n\n` +
+      (isImage
+        ? `Analyse l'image via son URL.`
+        : isAudio
+          ? `Transcription (si dispo):\n${extracted || "(transcription vide / indisponible)"}\n`
+          : `Extrait (si dispo):\n${extracted || "(extraction vide / indisponible)"}\n`),
   });
 
   if (isImage) parts.push({ type: "image_url", image_url: { url: attachment.url } });
@@ -805,7 +773,7 @@ Réponds en français, concret.
       { role: "user", content: parts },
     ],
     temperature: 0.2,
-    max_tokens: 800,
+    max_tokens: 900,
   });
 
   const out = cleanStr(completion?.choices?.[0]?.message?.content);
@@ -813,7 +781,7 @@ Réponds en français, concret.
 }
 
 // ==================================================
-// SENSI: WEB + MEMORY + FILE PLAN
+// SENSI: URL-ONLY WEB + MEMORY
 // ==================================================
 async function maybeExtractAndStoreMemory({ project, username, userText }) {
   const t = cleanStr(userText);
@@ -875,16 +843,6 @@ async function buildWebBundle(userText) {
     if (page.ok && page.text) pages.push(page);
   }
 
-  if (hasWeb()) {
-    const results = await serperSearch(userText, Math.max(6, Math.min(WEB_MAX_RESULTS, 12)));
-    const links = results.map((r) => r.link).filter(Boolean);
-    for (const u of links.slice(0, WEB_FETCH_PAGES)) {
-      if (urls.includes(u)) continue;
-      const page = await extractReadableTextFromUrl(u);
-      if (page.ok && page.text) pages.push(page);
-    }
-  }
-
   return buildWebContext(pages);
 }
 
@@ -906,14 +864,14 @@ async function sensiAnswer({ project, username, userText }) {
   let webContext = "";
   let sources = [];
   try {
-    const shouldWeb = hasWeb() || extractUrlsFromText(userText).length > 0;
-    if (shouldWeb) {
+    const urls = extractUrlsFromText(userText);
+    if (urls.length) {
       const built = await buildWebBundle(userText);
       webContext = built.contextText || "";
       sources = built.sources || [];
     }
   } catch (e) {
-    console.error("[web-any]", e);
+    console.error("[web-url-only]", e);
     webContext = "";
     sources = [];
   }
@@ -923,17 +881,9 @@ Tu es Sensi, IA d’assistance dans un chat collaboratif.
 
 Règles:
 1) Réponds en français, clair, concret.
-2) Si tu utilises le Contexte WEB, ajoute une section "Sources" (URLs) à la fin.
+2) Si tu utilises le Contexte WEB (URLs), ajoute une section "Sources" à la fin.
 3) Ne fabrique pas de sources.
-4) Si tu veux créer des fichiers, AJOUTE À LA FIN un bloc unique:
-
-\`\`\`json
-{
-  "create_files": [
-    { "type": "docx|xlsx|pptx|png", "filename": "nom.ext" }
-  ]
-}
-\`\`\`
+4) Si demande impossible/refus, explique brièvement et propose 2 alternatives.
 `.trim();
 
   const user = `
@@ -944,7 +894,7 @@ Message: ${userText}
 Mémoire globale (faits):
 ${memBlock}
 
-${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
+${webContext ? `\nContexte WEB (extraits URL):\n${webContext}\n` : ""}
 `.trim();
 
   const completion = await client.chat.completions.create({
@@ -954,7 +904,7 @@ ${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
       { role: "user", content: user },
     ],
     temperature: 0.2,
-    max_tokens: 900,
+    max_tokens: 1000,
   });
 
   const rawOut = cleanStr(completion?.choices?.[0]?.message?.content);
@@ -963,7 +913,7 @@ ${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
     return;
   }
 
-  const { cleanText, plan } = stripActionBlock(rawOut);
+  const { cleanText } = stripActionBlock(rawOut);
 
   let final = cleanText;
   if (webContext && sources.length && !/(?:^|\n)Sources\s*:/i.test(final)) {
@@ -972,49 +922,6 @@ ${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
 
   if (final) emitSensi(project, final);
 
-  if (plan?.create_files?.length) {
-    emitSensi(project, "🛠️ Création de fichier(s) en cours…");
-    const created = await createFilesFromPlan(plan);
-
-    for (const c of created) {
-      if (c.error) {
-        emitSensi(project, `⚠️ Fichier (${c.kind}) non créé: ${c.error}`);
-        continue;
-      }
-      const attachment = {
-        url: c.relUrl,
-        path: c.relUrl,
-        filename: c.filename,
-        mimetype:
-          c.kind === "docx" ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" :
-          c.kind === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" :
-          c.kind === "pptx" ? "application/vnd.openxmlformats-officedocument.presentationml.presentation" :
-          c.kind === "png" ? "image/png" : "application/octet-stream",
-      };
-
-      const msg = {
-        id: Date.now(),
-        ts: Date.now(),
-        project,
-        username: "Sensi",
-        userId: "sensi",
-        message: `📦 Fichier généré : ${attachment.filename}`,
-        attachment,
-      };
-
-      pushMessage(project, {
-        id: msg.id,
-        ts: msg.ts,
-        username: msg.username,
-        userId: msg.userId,
-        message: msg.message,
-        attachment: msg.attachment,
-      });
-
-      io.to(project).emit("chatMessage", msg);
-    }
-  }
-
   await maybeExtractAndStoreMemory({ project, username, userText }).catch(() => {});
 }
 
@@ -1022,6 +929,7 @@ ${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
 // PRESENCE + SOCKET EVENTS
 // ==================================================
 const presence = new Map(); // project -> Map(socketId -> {username,userId})
+
 function getUsers(project) {
   const map = presence.get(project);
   if (!map) return [];
@@ -1169,12 +1077,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on", PORT);
   console.log("Version:", APP_VERSION);
   console.log("AI:", hasOpenAI() ? "enabled" : "disabled");
-  console.log("WEB:", hasWeb() ? "enabled" : "disabled");
-  console.log("Deps:", {
-    jsdom: Boolean(JSDOM),
-    readability: Boolean(Readability),
-    docx: Boolean(docxPkg),
-    exceljs: Boolean(ExcelJS),
-    pptxgenjs: Boolean(PptxGenJS),
-  });
+  console.log("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
+  console.log("Web:", "url-only (no search provider)");
+  console.log("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
 });

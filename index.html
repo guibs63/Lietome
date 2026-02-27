@@ -1,15 +1,13 @@
-<!-- guibs:/index.html (COMPLET) — ULTRA v2 (Railway-safe, no-cache server-side) -->
+<!-- guibs:/index.html (COMPLET) — voice + FFT ready (client.js injecte la barre, mais on prépare un conteneur clean) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sensi - travail collaboratif 🚀</title>
-  <meta name="description" content="Chat collaboratif multi-projets avec Sensi (IA), présence temps réel et upload analysé automatiquement." />
-
   <style>
-    body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; background:#fafafa; }
-    h1{ margin-bottom:10px; }
+    body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
+    h1{ margin-bottom: 10px; }
 
     input, select, button{ padding:8px; font-size:14px; }
     button{ cursor:pointer; }
@@ -21,16 +19,15 @@
     @media (max-width: 900px){ .layout{ grid-template-columns:1fr; } }
 
     #chat{
-      border:1px solid #ddd;
+      border:1px solid #ccc;
       height:460px;
       overflow-y:auto;
       padding:10px;
       background:#fff;
-      border-radius:10px;
     }
 
     .msg{ margin-bottom:8px; line-height:1.35; word-break:break-word; }
-    .msg .time{ color:#888; margin-right:6px; font-size:12px; }
+    .msg .time{ color:#666; margin-right:6px; font-size:12px; }
     .msg.system{ color:#444; opacity:0.9; }
 
     form#chat-form{
@@ -46,14 +43,8 @@
 
     .upload-state{ font-size:12px; color:#666; }
 
-    .panel{
-      border:1px solid #ddd;
-      background:#fff;
-      padding:10px;
-      border-radius:10px;
-    }
+    .panel{ border:1px solid #ccc; background:#fff; padding:10px; }
     .panel h3{ margin:0 0 8px 0; font-size:15px; }
-
     .badge{
       display:inline-block;
       padding:2px 8px;
@@ -67,7 +58,7 @@
     #users{ list-style:none; padding:0; margin:0; }
     #users li{
       padding:6px 8px;
-      border-bottom:1px solid #f2f2f2;
+      border-bottom:1px solid #f0f0f0;
       display:flex;
       justify-content:space-between;
       gap:8px;
@@ -90,7 +81,6 @@
     }
     .msg-main{ flex:1; }
     .msg-actions{ position:relative; flex:0 0 auto; }
-
     .kebab{
       padding:2px 8px;
       border:1px solid #ddd;
@@ -98,7 +88,6 @@
       border-radius:6px;
       line-height:1;
     }
-
     .menu{
       position:absolute;
       right:0;
@@ -111,7 +100,6 @@
       padding:6px;
       z-index:50;
     }
-
     .menu-item{
       width:100%;
       text-align:left;
@@ -120,22 +108,40 @@
       border:0;
       border-radius:8px;
     }
-
     .menu-item:hover{ background:#f3f4f6; }
+
+    /* ===== VOICE BAR (injectée par client.js) =====
+       On met juste une cohérence visuelle au cas où. */
+    #voice-bar{
+      margin-top:10px;
+      padding:10px;
+      border:1px solid rgba(0,0,0,.12);
+      border-radius:12px;
+      background:#fff;
+    }
+    #voice-bar button{
+      border:1px solid #ddd;
+      background:#fff;
+    }
+    #voice-bar button:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+    }
+    #voice-bar canvas{
+      display:block;
+    }
   </style>
 </head>
 
 <body>
   <h1>Sensi - travail collaboratif 🚀</h1>
 
-  <!-- JOIN -->
   <div class="topbar">
     <input type="text" id="username" placeholder="Pseudo" autocomplete="nickname" />
     <select id="project"></select>
     <button id="join-btn" type="button">Rejoindre</button>
   </div>
 
-  <!-- PROJECTS CRUD -->
   <div class="topbar">
     <input type="text" id="new-project" placeholder="Nouveau projet (ex: EverCell)" />
     <button id="create-project-btn" type="button">+ Créer</button>
@@ -143,24 +149,29 @@
   </div>
 
   <div class="hint">
-    Chat multi-projets en temps réel.  
-    Upload fichiers (images, PDF, DOCX, XLSX…) → analyse automatique par Sensi.
+    Chat + présence + projets temps réel.<br/>
+    🎧 Reconnaissance vocale : dicte ton message et dis <strong>"over"</strong> pour envoyer automatiquement.<br/>
+    📊 Fréquences temps réel (FFT) affichées pendant l'écoute / l'enregistrement.<br/>
+    🎙️ Upload audio → transcription + analyse automatique par Sensi.
   </div>
 
   <div class="layout">
-    <!-- CHAT -->
     <div>
       <div id="chat" aria-live="polite"></div>
 
       <form id="chat-form" autocomplete="off">
         <input type="text" id="message" placeholder="Message..." autocomplete="off" />
-        <input type="file" id="file" accept=".pdf,.txt,.md,.csv,.docx,.xlsx,image/*" />
+        <input type="file" id="file" accept=".pdf,.txt,.docx,.xlsx,image/*,audio/*" />
         <button type="submit">Envoyer</button>
         <span class="upload-state" id="upload-state"></span>
       </form>
+
+      <!-- IMPORTANT:
+           La barre VOICE + le canvas FFT sont injectés par client.js juste après ce form.
+           (On ne met rien ici pour éviter les doublons.)
+      -->
     </div>
 
-    <!-- USERS ONLINE -->
     <aside class="panel">
       <h3>Users en ligne <span class="badge" id="users-count">0</span></h3>
       <div class="hint" style="margin:0 0 8px;">
@@ -170,11 +181,8 @@
     </aside>
   </div>
 
-  <!-- Socket.IO (servi automatiquement par Express) -->
   <script src="/socket.io/socket.io.js"></script>
-
-  <!-- Client -->
-  <!-- ⚠️ Cache désactivé côté serveur via Cache-Control: no-store -->
+  <!-- ✅ pas besoin de ?v= si Cache-Control:no-store est bien mis côté server -->
   <script src="/client.js"></script>
 </body>
 </html>
