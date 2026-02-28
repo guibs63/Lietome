@@ -1,4 +1,6 @@
 
+
+
 // guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Fix "over" send + Firefox audio UX) ✅
 "use strict";
 
@@ -731,41 +733,51 @@ async function startListening() {
 
   // Fix: on envoie sur FINAL seulement, en utilisant la détection robuste de "over"
   recognition.onresult = (event) => {
-    let interim = "";
-    let final = "";
+  let interim = "";
+  let final = "";
 
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const r = event.results[i];
-      const txt = r[0]?.transcript || "";
-      if (r.isFinal) final += txt + " ";
-      else interim += txt + " ";
+  for (let i = event.resultIndex; i < event.results.length; i++) {
+    const r = event.results[i];
+    const txt = r[0]?.transcript || "";
+    if (r.isFinal) final += txt + " ";
+    else interim += txt + " ";
+  }
+
+  const combined = cleanStr(final || interim);
+  if (!combined) return;
+
+  if (voiceHint) voiceHint.textContent = `🗣️ ${combined.slice(0, 80)}${combined.length > 80 ? "…" : ""}`;
+
+  // ✅ FIX: détecter "over" même s'il ne passe jamais en FINAL (cas fréquent)
+  const { hasOver, withoutOver } = hasOverWord(combined);
+
+  // append what was said (excluding "over") to input
+  const toAppend = cleanStr(withoutOver);
+  if (VOICE_APPEND_TO_INPUT && toAppend) {
+    const cur = cleanStr(input.value);
+    // évite de dupliquer si Speech renvoie la même phrase en boucle
+    if (!cur || !cur.endsWith(toAppend)) {
+      input.value = cur ? `${cur} ${toAppend}` : toAppend;
     }
+  }
 
-    const display = cleanStr(final || interim);
-    if (!display) return;
+  // anti double-send
+  window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
+  const now = Date.now();
 
-    if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
+  if (VOICE_SEND_ON_OVER && hasOver) {
+    if (now - window.__sensiLastOverSendTs < 1200) return;
+    window.__sensiLastOverSendTs = now;
 
-    if (cleanStr(final)) {
-      const { hasOver, withoutOver } = hasOverWord(final);
-
-      // append what was said (excluding "over") to input
-      const toAppend = cleanStr(withoutOver);
-      if (VOICE_APPEND_TO_INPUT && toAppend) {
-        const cur = cleanStr(input.value);
-        input.value = cur ? `${cur} ${toAppend}` : toAppend;
-      }
-
-      if (VOICE_SEND_ON_OVER && hasOver) {
-        const toSend = cleanStr(input.value);
-        if (toSend) {
-          sendTextMessage(toSend);
-          input.value = "";
-          input.focus();
-        }
-      }
+    const toSend = cleanStr(input.value);
+    if (toSend) {
+      sendTextMessage(toSend);
+      input.value = "";
+      input.focus();
+      if (voiceHint) voiceHint.textContent = `✅ Envoyé (over)`;
     }
-  };
+  }
+};
 
   try { recognition.start(); }
   catch (e) {
