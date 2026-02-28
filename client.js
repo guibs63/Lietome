@@ -1,4 +1,5 @@
 
+Chemin: guibs:/client.js
 
 
 // guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Fix "over" send + Firefox audio UX) ✅
@@ -748,20 +749,19 @@ async function startListening() {
 
   if (voiceHint) voiceHint.textContent = `🗣️ ${combined.slice(0, 80)}${combined.length > 80 ? "…" : ""}`;
 
-  // ✅ FIX: détecter "over" même s'il ne passe jamais en FINAL (cas fréquent)
+  // ✅ FIX FIREFOX: "over" peut rester en INTERIM et ne jamais passer en FINAL.
   const { hasOver, withoutOver } = hasOverWord(combined);
 
-  // append what was said (excluding "over") to input
+  // Ajoute la phrase (sans "over") dans l'input, sans dupliquer
   const toAppend = cleanStr(withoutOver);
   if (VOICE_APPEND_TO_INPUT && toAppend) {
     const cur = cleanStr(input.value);
-    // évite de dupliquer si Speech renvoie la même phrase en boucle
     if (!cur || !cur.endsWith(toAppend)) {
       input.value = cur ? `${cur} ${toAppend}` : toAppend;
     }
   }
 
-  // anti double-send
+  // Anti double-envoi si le moteur renvoie plusieurs fois "over"
   window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
   const now = Date.now();
 
