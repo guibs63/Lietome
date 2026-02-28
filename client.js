@@ -1,1285 +1,1077 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4 (Railway-safe + LOG FILE + /logs + WEB SEARCH auto + delete Sensi) ✅
+// guibs:/client.js (COMPLET) — ULTRA v3.4.1 CLIENT
+// ✅ Aligné server ULTRA v3.4.1 (FIX create project + FIX /projects compat)
+// ✅ /projects => tableau ["test", ...] (server v3.4.1)
+// ✅ sockets: getProjects/projectsUpdate + createProject + deleteProject + joinProject
+// ✅ Join project + chat history + presence
+// ✅ Delete message (author-only) + suppression autorisée pour Sensi côté server
+// ✅ Upload fichiers + audio via POST /upload
+// ✅ VOICE "OVER" + FFT temps réel + MediaRecorder
+// ✅ DEBUG: window.socket + logs + statusbar (#status-text si présent)
+
 "use strict";
 
-const express = require("express");
-const cors = require("cors");
-const http = require("http");
-const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
-const multer = require("multer");
-const { Server } = require("socket.io");
-const OpenAI = require("openai");
+/** =========================
+ *  SOCKET INIT (GLOBAL)
+ *  ========================= */
+const socket = io(window.location.origin, {
+  transports: ["websocket", "polling"],
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 600,
+  timeout: 20000,
+});
 
-// ==================================================
-// OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
-// ==================================================
-function optionalRequire(name) {
-  try {
-    return require(name);
-  } catch (e) {
-    if (e && e.code === "MODULE_NOT_FOUND") return null;
-    throw e;
+// ✅ rendre accessible depuis console
+window.socket = socket;
+
+console.log("client.js loaded ✅", { ioType: typeof io });
+
+/** =========================
+ *  FLAGS
+ *  ========================= */
+const AUTO_JOIN = false;
+
+// VOICE / AUDIO
+const ENABLE_VOICE = true;
+const VOICE_APPEND_TO_INPUT = true;
+
+// 🔥 envoi auto quand "over" est prononcé
+const VOICE_SEND_ON_OVER = true;
+const VOICE_OVER_WORD = "over";
+
+// FFT
+const SHOW_FFT = true;
+const FFT_FPS = 30;
+const FFT_BINS = 64;
+const FFT_SMOOTHING = 0.8;
+const FFT_FFTSIZE = 2048;
+const FFT_MIN_DB = -90;
+const FFT_MAX_DB = -10;
+
+// Upload audio + fichiers
+const UPLOAD_ENDPOINT = "/upload";
+const AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";
+const AUDIO_MAX_SECONDS = 120;
+
+/** =========================
+ *  STATE
+ *  ========================= */
+let currentProject = null;
+let currentUsername = null;
+
+const seenMessageIds = new Set();
+const messageNodes = new Map();
+
+/** =========================
+ *  STORAGE
+ *  ========================= */
+const LS_USER_ID = "sensi_user_id";
+const LS_LAST_USERNAME = "sensi_last_username";
+const LS_LAST_PROJECT = "sensi_last_project";
+const myUserId = getOrCreateUserId();
+
+/** =========================
+ *  DOM
+ *  ========================= */
+const chat = document.getElementById("chat");
+const form = document.getElementById("chat-form");
+const input = document.getElementById("message");
+const fileInput = document.getElementById("file");
+const uploadState = document.getElementById("upload-state");
+
+const usernameInput = document.getElementById("username");
+const projectSelect = document.getElementById("project");
+const joinBtn = document.getElementById("join-btn");
+
+const newProjectInput = document.getElementById("new-project");
+const createProjectBtn = document.getElementById("create-project-btn");
+const deleteProjectBtn = document.getElementById("delete-project-btn");
+
+const usersList = document.getElementById("users");
+const usersCount = document.getElementById("users-count");
+const currentProjectLabel = document.getElementById("current-project-label");
+
+// Optionnel: statusbar (#status-text)
+const statusText = document.getElementById("status-text");
+
+// VOICE UI (créée dynamiquement)
+let voiceBar = null;
+let btnVoice = null;
+let btnRec = null;
+let btnSendRec = null;
+let voiceHint = null;
+let fftCanvas = null;
+let fftCtx = null;
+
+/** =========================
+ *  DOM ASSERT
+ *  ========================= */
+(function assertDom() {
+  const required = [
+    ["chat", chat],
+    ["chat-form", form],
+    ["message", input],
+    ["username", usernameInput],
+    ["project", projectSelect],
+    ["join-btn", joinBtn],
+  ];
+  const missing = required.filter(([, el]) => !el).map(([id]) => id);
+  if (missing.length) {
+    console.error("DOM missing:", missing);
+    alert("Erreur UI: éléments manquants dans index.html : " + missing.join(", "));
+    throw new Error("UI DOM missing");
   }
+})();
+
+/** =========================
+ *  STATUSBAR HELPERS
+ *  ========================= */
+function setStatusBar(txt) {
+  if (!statusText) return;
+  statusText.textContent = String(txt || "");
 }
 
-// Web extraction (optional)
-const jsdomPkg = optionalRequire("jsdom");
-const readabilityPkg = optionalRequire("@mozilla/readability");
-const JSDOM = jsdomPkg ? jsdomPkg.JSDOM : null;
-const Readability = readabilityPkg ? (readabilityPkg.Readability || readabilityPkg) : null;
+/** =========================
+ *  SOCKET DEBUG / STATUS
+ *  ========================= */
+setStatusBar("socket: connecting…");
 
-// Docs creation (optional)
-const docxPkg = optionalRequire("docx");
-const excelJSPkg = optionalRequire("exceljs");
-const pptxPkg = optionalRequire("pptxgenjs");
+socket.on("connect", () => {
+  console.log("✅ socket connected", socket.id);
+  setStatusBar(`socket: connected (${socket.id})`);
+});
+socket.on("disconnect", (reason) => {
+  console.log("⚠️ socket disconnected", reason);
+  setStatusBar("socket: disconnected");
+});
+socket.on("connect_error", (err) => {
+  console.log("❌ connect_error", err?.message || err);
+  setStatusBar(`socket: error (${err?.message || "?"})`);
+});
 
-const Document = docxPkg ? docxPkg.Document : null;
-const Packer = docxPkg ? docxPkg.Packer : null;
-const Paragraph = docxPkg ? docxPkg.Paragraph : null;
-const HeadingLevel = docxPkg ? docxPkg.HeadingLevel : null;
-const TextRun = docxPkg ? docxPkg.TextRun : null;
-
-const ExcelJS = excelJSPkg || null;
-const PptxGenJS = pptxPkg || null;
-
-// ==================================================
-// APP INIT
-// ==================================================
-const app = express();
-app.set("trust proxy", 1);
-app.use(cors());
-app.use(express.json({ limit: "6mb" }));
-
-// ✅ anti-cache Railway
-app.get("/", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
-app.get("/client.js", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
-
-app.use(express.static(__dirname));
-
-// ==================================================
-// CONFIG
-// ==================================================
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4-websearch";
-const STORAGE_DIR = path.join(__dirname, "storage");
-const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
-const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
-const MEMORY_FILE = path.join(STORAGE_DIR, "global_memory.json");
-const LOG_FILE = path.join(STORAGE_DIR, "logs.txt");
-
-const UPLOADS_DIR = path.join(__dirname, "uploads");
-const GENERATED_DIR = path.join(__dirname, "generated");
-
-const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 350);
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 40);
-const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
-
-// IA
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2-chat-latest";
-const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
-const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-
-// Web behavior (URL-only)
-const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
-const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
-
-// ✅ Web search provider (optional)
-const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || "tavily"); // tavily | serpapi
-const TAVILY_API_KEY = cleanEnv(process.env.TAVILY_API_KEY || "");
-const SERPAPI_KEY = cleanEnv(process.env.SERPAPI_KEY || "");
-const WEB_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_TIMEOUT_MS || 12000);
-const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 6);
-
-// Cache
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
-
-// Audio auto transcript message
-const AUDIO_AUTO_TRANSCRIPT_MESSAGE = String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
-const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr";
-const AUDIO_TRANSCRIPT_PREFIX = process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
-
-// (optionnel) Protéger /logs avec un token
-const LOGS_TOKEN = cleanEnv(process.env.LOGS_TOKEN || "");
-
-// ==================================================
-// INIT DIRS
-// ==================================================
-function ensureDirs() {
-  if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  if (!fs.existsSync(GENERATED_DIR)) fs.mkdirSync(GENERATED_DIR, { recursive: true });
-
-  if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
-  if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["test"], null, 2), "utf8");
-  if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({ facts: [] }, null, 2), "utf8");
-  if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "", "utf8");
-}
-ensureDirs();
-
-app.use("/uploads", express.static(UPLOADS_DIR));
-app.use("/generated", express.static(GENERATED_DIR));
-
-// ==================================================
-// LOGGING (FILE + CONSOLE)
-// ==================================================
-function cleanEnv(v) { return String(v ?? "").trim(); }
-
-function logLine(...args) {
-  const safe = args.map((a) => {
-    try { return typeof a === "string" ? a : JSON.stringify(a); }
-    catch { return String(a); }
-  });
-
-  const line = `[${new Date().toISOString()}] ${safe.join(" ")}\n`;
-
-  try {
-    if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    fs.appendFileSync(LOG_FILE, line, "utf8");
-  } catch {}
-  console.log(...args);
-}
-
-function tailFile(filePath, maxLines = 200) {
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const lines = raw.split("\n");
-    return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
-  } catch {
-    return "";
-  }
-}
-
-// ==================================================
-// HELPERS
-// ==================================================
-function readJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
-}
-function writeJSON(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
-  catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
-}
+/** =========================
+ *  UTILS
+ *  ========================= */
 function cleanStr(v) { return String(v ?? "").trim(); }
-function safeProjectKey(project) {
-  const p = cleanStr(project);
-  return p ? p.slice(0, 80) : "";
-}
-function isValidProjectName(name) {
-  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
-}
-function hasOpenAI() { return Boolean(OPENAI_API_KEY); }
-function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
 
-function hasWebSearch() {
-  if (WEB_SEARCH_PROVIDER === "serpapi") return Boolean(SERPAPI_KEY);
-  return Boolean(TAVILY_API_KEY);
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function webModeLabel() {
-  if (hasWebSearch()) return `search(${WEB_SEARCH_PROVIDER})`;
-  return "url-only";
-}
-
-// ==================================================
-// STATE
-// ==================================================
-let historyByProject = readJSON(HISTORY_FILE, {});
-let projects = readJSON(PROJECTS_FILE, ["test"]);
-let globalMemory = readJSON(MEMORY_FILE, { facts: [] });
-
-if (!Array.isArray(projects) || projects.length === 0) projects = ["test"];
-projects = Array.from(new Set(projects.map((p) => cleanStr(p)).filter(Boolean)));
-if (!globalMemory || typeof globalMemory !== "object") globalMemory = { facts: [] };
-if (!Array.isArray(globalMemory.facts)) globalMemory.facts = [];
-
-// save debounce
-let saveTimer = null;
-function scheduleHistorySave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    writeJSON(HISTORY_FILE, historyByProject);
-  }, 400);
-}
-function saveProjectsNow() { writeJSON(PROJECTS_FILE, projects); }
-function saveMemoryNow() { writeJSON(MEMORY_FILE, globalMemory); }
-
-function getHistory(project) {
-  const p = safeProjectKey(project);
-  const arr = historyByProject[p];
-  return Array.isArray(arr) ? arr : [];
-}
-function pushMessage(project, msgObj) {
-  const p = safeProjectKey(project);
-  if (!p) return;
-  if (!Array.isArray(historyByProject[p])) historyByProject[p] = [];
-  historyByProject[p].push(msgObj);
-  if (historyByProject[p].length > MAX_MESSAGES_PER_PROJECT) {
-    historyByProject[p] = historyByProject[p].slice(-MAX_MESSAGES_PER_PROJECT);
-  }
-  scheduleHistorySave();
-}
-function listProjects() {
-  return projects.slice().sort((a, b) => a.localeCompare(b, "fr"));
-}
-
-// ==================================================
-// MEMORY GLOBAL
-// ==================================================
-function normalizeFactText(t) {
-  return cleanStr(t).replace(/\s+/g, " ").slice(0, 280);
-}
-function addGlobalFact({ text, who = "", project = "" }) {
-  const factText = normalizeFactText(text);
-  if (!factText) return false;
-
-  const exists = globalMemory.facts.some((f) => normalizeFactText(f.text) === factText);
-  if (exists) return false;
-
-  const now = Date.now();
-  globalMemory.facts.unshift({
-    id: `fact_${now}_${Math.random().toString(16).slice(2)}`,
-    text: factText,
-    who: cleanStr(who).slice(0, 80),
-    project: cleanStr(project).slice(0, 80),
-    ts: now,
-  });
-  if (globalMemory.facts.length > 500) globalMemory.facts = globalMemory.facts.slice(0, 500);
-  saveMemoryNow();
-  return true;
-}
-function memoryTop(n = 14) {
-  return globalMemory.facts.slice(0, n);
-}
-function renderMemoryBlock() {
-  const facts = memoryTop(14);
-  if (!facts.length) return "Aucune mémoire globale enregistrée.";
-  return facts.map((f, i) => `${i + 1}. ${f.text}`).join("\n");
-}
-
-// ==================================================
-// ROUTES
-// ==================================================
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    time: new Date().toISOString(),
-    version: APP_VERSION,
-    ai: hasOpenAI() ? "enabled" : "disabled",
-    deps: {
-      jsdom: Boolean(JSDOM),
-      readability: Boolean(Readability),
-      docx: Boolean(docxPkg),
-      exceljs: Boolean(ExcelJS),
-      pptxgenjs: Boolean(PptxGenJS),
-    },
-    models: {
-      chat: OPENAI_MODEL,
-      transcribe: OPENAI_TRANSCRIBE_MODEL,
-      image: OPENAI_IMAGE_MODEL,
-    },
-    web: webModeLabel(),
-    audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
-    logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
-  });
-});
-
-app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
-
-app.get("/logs", (req, res) => {
-  if (LOGS_TOKEN) {
-    const token = cleanStr(req.query?.token);
-    if (!token || token !== LOGS_TOKEN) {
-      return res.status(401).send("unauthorized (missing/invalid token)");
-    }
-  }
-  const out = tailFile(LOG_FILE, 220);
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.send(out || "no logs");
-});
-
-// ==================================================
-// SERVER + SOCKET
-// ==================================================
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
-
-// ==================================================
-// FILE HELPERS
-// ==================================================
-function isTextLikeExt(ext) {
-  return [".txt", ".md", ".csv", ".log", ".json", ".yaml", ".yml"].includes(ext);
-}
-function isAudioLike(mimetype, ext) {
-  if (mimetype && mimetype.startsWith("audio/")) return true;
-  return [".mp3", ".wav", ".m4a", ".aac", ".ogg", ".webm", ".flac", ".mp4", ".mka"].includes(ext);
-}
-function extFromMime(mime, originalName) {
-  const fallback = path.extname(originalName || "").slice(0, 10);
-  if (fallback) return fallback;
-
-  if (mime === "image/png") return ".png";
-  if (mime === "image/jpeg") return ".jpg";
-  if (mime === "image/webp") return ".webp";
-  if (mime === "application/pdf") return ".pdf";
-  if (mime === "text/plain") return ".txt";
-
-  if (mime === "audio/webm") return ".webm";
-  if (mime === "audio/ogg") return ".ogg";
-  if (mime === "audio/mpeg") return ".mp3";
-  if (mime === "audio/wav") return ".wav";
-  if (mime === "audio/x-wav") return ".wav";
-  if (mime === "audio/mp4") return ".m4a";
-  if (mime && mime.startsWith("audio/")) return ".audio";
-
-  return "";
-}
-
-// ==================================================
-// UPLOAD
-// ==================================================
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => {
-    const ext = extFromMime(file.mimetype, file.originalname);
-    const id = crypto.randomBytes(12).toString("hex");
-    cb(null, `${Date.now()}_${id}${ext}`);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: MAX_UPLOAD_BYTES },
-});
-
-app.post("/upload", upload.single("file"), async (req, res) => {
+function formatTime(ts) {
   try {
-    const project = safeProjectKey(req.body?.project);
-    const username = cleanStr(req.body?.username) || "Anonyme";
-    const userId = cleanStr(req.body?.userId);
-
-    if (!project || !projects.includes(project)) return res.status(400).json({ ok: false, error: "Projet invalide." });
-    if (!userId) return res.status(400).json({ ok: false, error: "userId manquant." });
-    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun fichier." });
-
-    const hostBase = `${req.protocol}://${req.get("host")}`;
-    const url = `${hostBase}/uploads/${encodeURIComponent(req.file.filename)}`;
-
-    const attachment = {
-      url,
-      path: `/uploads/${req.file.filename}`,
-      filename: req.file.originalname,
-      storedAs: req.file.filename,
-      mimetype: req.file.mimetype || "application/octet-stream",
-      size: req.file.size,
-    };
-
-    const msg = {
-      id: Date.now(),
-      ts: Date.now(),
-      project,
-      username,
-      userId,
-      message: `📎 ${attachment.filename}`,
-      attachment,
-    };
-
-    pushMessage(project, {
-      id: msg.id,
-      ts: msg.ts,
-      username: msg.username,
-      userId: msg.userId,
-      message: msg.message,
-      attachment: msg.attachment,
-    });
-
-    io.to(project).emit("chatMessage", msg);
-
-    const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
-    const isAudio = isAudioLike(String(attachment.mimetype || ""), ext);
-
-    if (isAudio && AUDIO_AUTO_TRANSCRIPT_MESSAGE) {
-      const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
-
-      (async () => {
-        try {
-          const transcript = await transcribeAudioFile(localPath);
-          const t = cleanStr(transcript);
-          if (t) {
-            const tMsg = {
-              id: Date.now(),
-              ts: Date.now(),
-              project,
-              username,
-              userId,
-              message: `${AUDIO_TRANSCRIPT_PREFIX}${t}`,
-              meta: { kind: "audio_transcript", attachmentUrl: attachment.url, attachmentName: attachment.filename },
-            };
-
-            pushMessage(project, {
-              id: tMsg.id,
-              ts: tMsg.ts,
-              username: tMsg.username,
-              userId: tMsg.userId,
-              message: tMsg.message,
-              meta: tMsg.meta,
-            });
-
-            io.to(project).emit("chatMessage", tMsg);
-
-            try { await sensiAnswer({ project, username, userText: t }); }
-            catch (e) { logLine("[sensi-audio-transcript]", e?.message || e, e?.stack); emitSensi(project, "⚠️ Erreur Sensi sur transcription."); }
-          } else {
-            emitSystem(project, `🎙️ Audio reçu (${attachment.filename}) — transcription indisponible.`);
-          }
-
-          analyzeFileWithSensi({ project, username, attachment }).catch((e) => logLine("[sensi-file]", e?.message || e, e?.stack));
-        } catch (e) {
-          logLine("[audio-transcript-flow]", e?.message || e, e?.stack);
-          analyzeFileWithSensi({ project, username, attachment }).catch((er) => logLine("[sensi-file]", er?.message || er, er?.stack));
-        }
-      })();
-    } else {
-      analyzeFileWithSensi({ project, username, attachment }).catch((e) => logLine("[sensi-file]", e?.message || e, e?.stack));
-    }
-
-    res.json({ ok: true, project, attachment });
-  } catch (e) {
-    logLine("[upload]", e?.message || e, e?.stack);
-    res.status(500).json({ ok: false, error: "Upload error" });
-  }
-});
-
-// ==================================================
-// EMIT HELPERS
-// ==================================================
-function emitSensi(project, text, extra = {}) {
-  const msg = {
-    id: Date.now(),
-    ts: Date.now(),
-    project,
-    username: "Sensi",
-    userId: "sensi",
-    message: text,
-    ...extra,
-  };
-  pushMessage(project, {
-    id: msg.id,
-    ts: msg.ts,
-    username: msg.username,
-    userId: msg.userId,
-    message: msg.message,
-    attachment: msg.attachment,
-    meta: msg.meta,
-  });
-  io.to(project).emit("chatMessage", msg);
-}
-function emitSystem(project, text) {
-  io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
-}
-
-// ==================================================
-// DELETE author-only + DELETE ATTACHMENT FILE
-// ==================================================
-function safeUnlinkUpload(storedAs) {
-  const name = cleanStr(storedAs);
-  if (!name) return;
-  if (name.includes("..") || name.includes("/") || name.includes("\\")) return;
-  const full = path.join(UPLOADS_DIR, name);
-  try {
-    if (fs.existsSync(full)) fs.unlinkSync(full);
-  } catch (e) {
-    logLine("[unlink]", e?.message || e);
-  }
-}
-
-// ✅ anyone can delete Sensi messages
-function canDeleteMessage(msg, requesterUserId) {
-  const reqId = cleanStr(requesterUserId);
-  if (!reqId) return false;
-  const authorId = cleanStr(msg?.userId);
-  if (authorId && authorId === reqId) return true;
-  if (authorId === "sensi") return true;
-  return false;
-}
-
-function deleteMessageIfAuthor(project, messageId, requesterUserId) {
-  const p = safeProjectKey(project);
-  if (!p) return { ok: false, reason: "bad_project" };
-  if (!Array.isArray(historyByProject[p])) return { ok: false, reason: "no_history" };
-
-  const idNum = Number(messageId);
-  if (!Number.isFinite(idNum)) return { ok: false, reason: "bad_id" };
-  const reqId = cleanStr(requesterUserId);
-  if (!reqId) return { ok: false, reason: "no_user" };
-
-  const arr = historyByProject[p];
-  const idx = arr.findIndex((m) => Number(m?.id) === idNum);
-  if (idx === -1) return { ok: false, reason: "not_found" };
-
-  const msg = arr[idx];
-  if (!canDeleteMessage(msg, reqId)) return { ok: false, reason: "not_author" };
-
-  const storedAs = cleanStr(msg?.attachment?.storedAs);
-  if (storedAs) safeUnlinkUpload(storedAs);
-
-  arr.splice(idx, 1);
-  scheduleHistorySave();
-  return { ok: true };
-}
-
-// ==================================================
-// URL-ONLY WEB: CACHE + URL OPEN
-// ==================================================
-const cache = new Map(); // key -> { ts, data }
-function cacheGet(key) {
-  const v = cache.get(key);
-  if (!v) return null;
-  if (Date.now() - v.ts > CACHE_TTL_MS) {
-    cache.delete(key);
-    return null;
-  }
-  return v.data;
-}
-function cacheSet(key, data) {
-  cache.set(key, { ts: Date.now(), data });
-}
-
-async function fetchWithTimeout(url, ms) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    const resp = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    });
-    return resp;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function cleanExtractedText(t) {
-  return cleanStr(t).replace(/\n{3,}/g, "\n\n").slice(0, WEB_MAX_CHARS_PER_PAGE);
-}
-
-function naiveHtmlToText(html) {
-  const s = cleanStr(html);
-  if (!s) return "";
-  return cleanExtractedText(
-    s
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<\/p>|<br\s*\/?>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s{2,}/g, " ")
-  );
-}
-
-async function extractReadableTextFromUrl(url) {
-  const u = cleanStr(url);
-  if (!u) return { ok: false, url, text: "", title: "" };
-
-  const cacheKey = `page:${u}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  try {
-    const resp = await fetchWithTimeout(u, WEB_PAGE_TIMEOUT_MS);
-    if (!resp.ok) {
-      const out = { ok: false, url: u, text: "", title: "" };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    const ct = resp.headers.get("content-type") || "";
-    const raw = await resp.text().catch(() => "");
-
-    if (!ct.includes("text/html")) {
-      const out = { ok: true, url: u, title: "", text: cleanExtractedText(raw) };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    if (!JSDOM || !Readability) {
-      const out = { ok: true, url: u, title: "", text: naiveHtmlToText(raw) };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    const dom = new JSDOM(raw, { url: u });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
-
-    const title = cleanStr(article?.title) || cleanStr(dom.window.document.title) || "";
-    const text = cleanExtractedText(article?.textContent || "");
-
-    const out = { ok: true, url: u, title, text };
-    cacheSet(cacheKey, out);
-    return out;
+    if (!ts) return "";
+    const d = new Date(ts);
+    return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
   } catch {
-    const out = { ok: false, url: u, text: "", title: "" };
-    cacheSet(cacheKey, out);
-    return out;
-  }
-}
-
-function chunkText(text, chunkSize = 1400, overlap = 180) {
-  const t = cleanStr(text);
-  if (!t) return [];
-  const chunks = [];
-  let i = 0;
-  while (i < t.length) {
-    chunks.push(t.slice(i, i + chunkSize));
-    i += (chunkSize - overlap);
-  }
-  return chunks.slice(0, 12);
-}
-
-function buildWebContext(pages) {
-  const blocks = [];
-  let srcIndex = 1;
-
-  for (const p of pages) {
-    if (!p?.text) continue;
-    const title = cleanStr(p.title) || "Source";
-    const url = cleanStr(p.url);
-    const chunks = chunkText(p.text);
-    if (!chunks.length) continue;
-
-    blocks.push({
-      source_id: srcIndex,
-      title,
-      url,
-      chunk: chunks[0],
-    });
-
-    srcIndex += 1;
-    if (srcIndex > 6) break;
-  }
-
-  if (!blocks.length) return { contextText: "", sources: [] };
-
-  const contextText = blocks
-    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nContenu:\n${b.chunk}`)
-    .join("\n\n");
-  const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
-  return { contextText, sources };
-}
-
-function extractUrlsFromText(text) {
-  const t = cleanStr(text);
-  if (!t) return [];
-  const re = /\bhttps?:\/\/[^\s<>()"]+/gi;
-  const found = t.match(re) || [];
-  return Array.from(new Set(found.map((u) => u.replace(/[)\].,;!?]+$/g, "")))).slice(0, 10);
-}
-
-// ==================================================
-// ✅ WEB SEARCH (Tavily / SerpAPI) + build context
-// ==================================================
-async function fetchJsonWithTimeout(url, options = {}, ms = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    const resp = await fetch(url, { ...options, signal: controller.signal });
-    const text = await resp.text().catch(() => "");
-    let data = null;
-    try { data = JSON.parse(text); } catch { data = null; }
-    return { ok: resp.ok, status: resp.status, data, raw: text };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function webSearch(query) {
-  const q = cleanStr(query);
-  if (!q || !hasWebSearch()) return { ok: false, results: [] };
-
-  const cacheKey = `search:${WEB_SEARCH_PROVIDER}:${q.toLowerCase()}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
-  try {
-    if (WEB_SEARCH_PROVIDER === "serpapi") {
-      const url = `https://serpapi.com/search.json?q=${encodeURIComponent(q)}&engine=google&hl=fr&gl=fr&api_key=${encodeURIComponent(SERPAPI_KEY)}`;
-      const r = await fetchJsonWithTimeout(url, {}, WEB_SEARCH_TIMEOUT_MS);
-      const items = [];
-      const organic = r?.data?.organic_results || [];
-      for (const it of organic.slice(0, WEB_SEARCH_MAX_RESULTS)) {
-        items.push({
-          title: cleanStr(it?.title),
-          url: cleanStr(it?.link),
-          snippet: cleanStr(it?.snippet || it?.snippet_highlighted_words?.join(" ") || ""),
-        });
-      }
-      const out = { ok: true, results: items.filter(x => x.url).slice(0, WEB_SEARCH_MAX_RESULTS) };
-      cacheSet(cacheKey, out);
-      return out;
-    }
-
-    // default: tavily
-    const url = "https://api.tavily.com/search";
-    const body = {
-      api_key: TAVILY_API_KEY,
-      query: q,
-      search_depth: "basic",
-      max_results: WEB_SEARCH_MAX_RESULTS,
-      include_answer: false,
-      include_raw_content: false,
-      include_images: false,
-    };
-    const r = await fetchJsonWithTimeout(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, WEB_SEARCH_TIMEOUT_MS);
-
-    const items = [];
-    const results = r?.data?.results || [];
-    for (const it of results.slice(0, WEB_SEARCH_MAX_RESULTS)) {
-      items.push({
-        title: cleanStr(it?.title),
-        url: cleanStr(it?.url),
-        snippet: cleanStr(it?.content || it?.snippet || ""),
-      });
-    }
-    const out = { ok: true, results: items.filter(x => x.url).slice(0, WEB_SEARCH_MAX_RESULTS) };
-    cacheSet(cacheKey, out);
-    return out;
-  } catch (e) {
-    logLine("[webSearch]", e?.message || e);
-    const out = { ok: false, results: [] };
-    cacheSet(cacheKey, out);
-    return out;
-  }
-}
-
-function buildSearchContext(searchResults) {
-  const items = Array.isArray(searchResults) ? searchResults : [];
-  if (!items.length) return { contextText: "", sources: [] };
-
-  const blocks = [];
-  let srcIndex = 1;
-
-  for (const it of items.slice(0, 6)) {
-    const title = cleanStr(it.title) || "Source";
-    const url = cleanStr(it.url);
-    const snippet = cleanStr(it.snippet).slice(0, 1200);
-    if (!url || !snippet) continue;
-
-    blocks.push({
-      source_id: srcIndex,
-      title,
-      url,
-      chunk: snippet,
-    });
-
-    srcIndex += 1;
-  }
-
-  if (!blocks.length) return { contextText: "", sources: [] };
-
-  const contextText = blocks
-    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nContenu:\n${b.chunk}`)
-    .join("\n\n");
-  const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
-  return { contextText, sources };
-}
-
-// Heuristique : quand lancer une recherche web ?
-function shouldWebSearch(userText) {
-  const t = cleanStr(userText).toLowerCase();
-  if (!t) return false;
-  // si URLs fournies => URL-only suffit
-  if (extractUrlsFromText(userText).length) return false;
-
-  return /(\baujourd['’]hui\b|\bmaintenant\b|\bactu\b|\bactualité\b|\bnews\b|\bdernier\b|\bderni[eè]re\b|\brécent\b|\bprix\b|\btaux\b|\bbourse\b|\bmétéo\b|\bscore\b|\brésultat\b|\bqui\s+est\s+le\s+président\b|\bquelle\s+heure\b|\bheure\s+est[- ]il\b|\bdate\b)/i.test(t);
-}
-
-// ==================================================
-// TIME (France)
-// ==================================================
-function nowInFrance() {
-  return new Intl.DateTimeFormat("fr-FR", {
-    timeZone: "Europe/Paris",
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date());
-}
-
-// ==================================================
-// FILE ANALYSIS (docs + images + audio)
-// ==================================================
-async function extractTextFromFile(localFilePath, mimetype, originalName) {
-  const ext = (path.extname(originalName || "") || "").toLowerCase();
-
-  if ((mimetype && mimetype.startsWith("text/")) || isTextLikeExt(ext)) {
-    try {
-      const raw = fs.readFileSync(localFilePath, "utf8");
-      return raw.slice(0, 18000);
-    } catch {
-      return "";
-    }
-  }
-
-  if (mimetype === "application/pdf" || ext === ".pdf") {
-    const pdfParse = optionalRequire("pdf-parse");
-    if (!pdfParse) return "";
-    try {
-      const buf = fs.readFileSync(localFilePath);
-      const out = await pdfParse(buf);
-      return String(out?.text || "").slice(0, 18000);
-    } catch (e) {
-      logLine("[pdf-parse]", e?.message || e);
-      return "";
-    }
-  }
-
-  if (ext === ".docx") {
-    const mammoth = optionalRequire("mammoth");
-    if (!mammoth) return "";
-    try {
-      const result = await mammoth.extractRawText({ path: localFilePath });
-      return String(result?.value || "").slice(0, 18000);
-    } catch (e) {
-      logLine("[mammoth]", e?.message || e);
-      return "";
-    }
-  }
-
-  if (ext === ".xlsx") {
-    const XLSX = optionalRequire("xlsx");
-    if (!XLSX) return "";
-    try {
-      const wb = XLSX.readFile(localFilePath);
-      const sheetName = wb.SheetNames?.[0];
-      if (!sheetName) return "";
-      const ws = wb.Sheets[sheetName];
-      const csv = XLSX.utils.sheet_to_csv(ws);
-      return String(csv || "").slice(0, 18000);
-    } catch (e) {
-      logLine("[xlsx-read]", e?.message || e);
-      return "";
-    }
-  }
-
-  return "";
-}
-
-async function transcribeAudioFile(localFilePath) {
-  if (!hasOpenAI()) return "";
-  const client = getOpenAIClient();
-  try {
-    const file = fs.createReadStream(localFilePath);
-    const resp = await client.audio.transcriptions.create({
-      model: OPENAI_TRANSCRIBE_MODEL,
-      file,
-      language: AUDIO_TRANSCRIPT_LANGUAGE,
-    });
-    const text = cleanStr(resp?.text || "");
-    return text.slice(0, 18000);
-  } catch (e) {
-    logLine("[transcribe]", e?.message || e, e?.stack);
     return "";
   }
 }
 
-async function analyzeFileWithSensi({ project, username, attachment }) {
-  if (!hasOpenAI()) {
-    emitSensi(project, `ℹ️ IA non configurée. Fichier reçu : ${attachment.filename}`);
+function getOrCreateUserId() {
+  try {
+    const existing = localStorage.getItem(LS_USER_ID);
+    if (existing && existing.length >= 8) return existing;
+
+    const uid = (crypto?.randomUUID
+      ? crypto.randomUUID()
+      : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`
+    );
+
+    localStorage.setItem(LS_USER_ID, uid);
+    return uid;
+  } catch {
+    return `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+}
+
+function saveLastSession() {
+  try {
+    if (currentUsername) localStorage.setItem(LS_LAST_USERNAME, currentUsername);
+    if (currentProject) localStorage.setItem(LS_LAST_PROJECT, currentProject);
+  } catch {}
+}
+
+function restoreLastSession() {
+  try {
+    const u = cleanStr(localStorage.getItem(LS_LAST_USERNAME));
+    const p = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+    if (u && !cleanStr(usernameInput.value)) usernameInput.value = u;
+    return { u, p };
+  } catch {
+    return { u: "", p: "" };
+  }
+}
+
+function setProjectLabel(p) {
+  if (!currentProjectLabel) return;
+  currentProjectLabel.textContent = p || "—";
+}
+
+function isSupportedMime(mime) {
+  try {
+    return !!(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mime));
+  } catch { return false; }
+}
+
+function pickAudioMime() {
+  if (isSupportedMime(AUDIO_MIME_PREFERRED)) return AUDIO_MIME_PREFERRED;
+  const fallbacks = ["audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"];
+  for (const m of fallbacks) if (isSupportedMime(m)) return m;
+  return "";
+}
+
+/** =========================
+ *  UI
+ *  ========================= */
+function clearChat() {
+  chat.innerHTML = "";
+  seenMessageIds.clear();
+  messageNodes.clear();
+}
+
+function addSystem(text) {
+  const div = document.createElement("div");
+  div.className = "msg system";
+  div.innerHTML = `<em>🛡️ ${escapeHtml(text)}</em>`;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function closeAllMenus() {
+  document.querySelectorAll(".menu").forEach((m) => m.setAttribute("hidden", ""));
+}
+document.addEventListener("click", () => closeAllMenus());
+
+function removeMessageFromUI(messageId) {
+  const id = Number(messageId);
+  if (!Number.isFinite(id)) return;
+
+  const node = messageNodes.get(id);
+  if (node && node.parentNode) node.parentNode.removeChild(node);
+
+  messageNodes.delete(id);
+  seenMessageIds.delete(id);
+}
+
+function renderAttachment(att) {
+  if (!att?.url) return "";
+  const name = escapeHtml(att.filename || "fichier");
+  const url = escapeHtml(att.url);
+  const isImg = String(att.mimetype || "").startsWith("image/");
+  const isAudio = String(att.mimetype || "").startsWith("audio/");
+
+  if (isImg) {
+    return `
+      <div style="margin-top:6px;">
+        <a href="${url}" target="_blank" rel="noopener">🖼️ ${name}</a><br/>
+        <img src="${url}" alt="${name}"
+             style="max-width:260px; border:1px solid #ddd; border-radius:10px; margin-top:6px;" />
+      </div>
+    `;
+  }
+
+  if (isAudio) {
+    return `
+      <div style="margin-top:6px;">
+        <a href="${url}" target="_blank" rel="noopener">🎙️ ${name}</a>
+        <div style="margin-top:6px;">
+          <audio controls preload="none" src="${url}" style="width:260px;"></audio>
+        </div>
+      </div>
+    `;
+  }
+
+  return `<div style="margin-top:6px;"><a href="${url}" target="_blank" rel="noopener">📄 ${name}</a></div>`;
+}
+
+function addMessage({ id, ts, username, userId, message, attachment }) {
+  const mid = Number(id);
+  if (Number.isFinite(mid) && seenMessageIds.has(mid)) return;
+  if (Number.isFinite(mid)) seenMessageIds.add(mid);
+
+  const time = formatTime(ts);
+  const isMine = cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId);
+
+  const row = document.createElement("div");
+  row.className = "msg msg-row";
+  if (Number.isFinite(mid)) row.dataset.mid = String(mid);
+
+  row.innerHTML = `
+    <div class="msg-main">
+      <span class="time">${time ? `[${time}]` : ""}</span>
+      <strong>${escapeHtml(username)}:</strong>
+      <span class="text">${escapeHtml(message)}</span>
+      ${attachment ? renderAttachment(attachment) : ""}
+    </div>
+
+    <div class="msg-actions">
+      ${isMine ? `
+        <button class="kebab" type="button" title="Options">⋮</button>
+        <div class="menu" hidden>
+          <button class="menu-item delete" type="button">🗑️ Supprimer</button>
+        </div>
+      ` : ""}
+    </div>
+  `;
+
+  if (isMine) {
+    const kebab = row.querySelector(".kebab");
+    const menu = row.querySelector(".menu");
+    const delBtn = row.querySelector(".menu-item.delete");
+
+    kebab.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isHidden = menu.hasAttribute("hidden");
+      closeAllMenus();
+      if (isHidden) menu.removeAttribute("hidden");
+    });
+
+    delBtn.addEventListener("click", () => {
+      if (!currentProject) return;
+      if (!Number.isFinite(mid)) return;
+      const ok = confirm("Supprimer ce message ?");
+      if (!ok) return;
+      socket.emit("deleteMessage", { project: currentProject, messageId: mid, userId: myUserId });
+      menu.setAttribute("hidden", "");
+    });
+  }
+
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+  if (Number.isFinite(mid)) messageNodes.set(mid, row);
+}
+
+function renderUsers(users) {
+  const arr = Array.isArray(users) ? users : [];
+  if (usersList) usersList.innerHTML = "";
+  if (usersCount) usersCount.textContent = String(arr.length);
+
+  if (!usersList) return;
+
+  if (arr.length === 0) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span style="color:#666;">Aucun user</span>`;
+    usersList.appendChild(li);
     return;
   }
 
-  const client = getOpenAIClient();
-  const mimetype = String(attachment.mimetype || "application/octet-stream");
-  const isImage = mimetype.startsWith("image/");
-  const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
-  const isAudio = isAudioLike(mimetype, ext);
+  for (const u of arr) {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <span class="userline">
+        <span class="dot" title="en ligne"></span>
+        <span class="uname">${escapeHtml(u)}</span>
+      </span>
+      <span style="color:#999;font-size:12px;">online</span>
+    `;
+    usersList.appendChild(li);
+  }
+}
 
-  const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
+function setProjectsOptions(projects, keepSelection = true) {
+  const prev = keepSelection ? cleanStr(projectSelect.value) : "";
+  projectSelect.innerHTML = "";
 
-  let extracted = "";
-  if (isAudio) extracted = await transcribeAudioFile(localPath);
-  else if (!isImage) extracted = await extractTextFromFile(localPath, mimetype, attachment.filename);
+  for (const p of (projects || [])) {
+    const name = cleanStr(p);
+    if (!name) continue;
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    projectSelect.appendChild(opt);
+  }
 
-  const system = `
-Tu es Sensi.
-Tu reçois un fichier uploadé dans un projet.
+  if (keepSelection && prev) {
+    const exists = Array.from(projectSelect.options).some((o) => o.value === prev);
+    if (exists) projectSelect.value = prev;
+  }
 
-Tâches:
-1) Résumer (3-8 lignes)
-2) Points clés (bullet points)
-3) Actions recommandées (3-8)
-4) Si image: décrire précisément ce que tu vois.
-5) Si audio: résume la transcription + extrait les décisions/actions.
+  if (!projectSelect.value && projectSelect.options.length > 0) {
+    projectSelect.value = projectSelect.options[0].value;
+  }
+}
 
-IMPORTANT:
-- Si tu n'as AUCUN contenu exploitable (extraction/transcription vide), dis-le clairement en 1 phrase,
-  puis propose 3 actions concrètes (ex: ré-uploader, autre format).
-Réponds en français, concret.
-`.trim();
+/** =========================
+ *  JOIN
+ *  ========================= */
+function joinProject() {
+  const username = cleanStr(usernameInput.value);
+  const project = cleanStr(projectSelect.value);
 
-  const parts = [];
-  parts.push({
-    type: "text",
-    text:
-      `Projet: ${project}\nAuteur upload: ${username}\n` +
-      `Fichier: ${attachment.filename}\nType: ${mimetype}\nURL: ${attachment.url}\n\n` +
-      (isImage
-        ? `Analyse l'image via son URL.`
-        : isAudio
-          ? `Transcription (si dispo):\n${extracted || "(transcription vide / indisponible)"}\n`
-          : `Extrait (si dispo):\n${extracted || "(extraction vide / indisponible)"}\n`),
+  if (!username) return alert("Entre un pseudo 🙂");
+  if (!project) return alert("Aucun projet disponible.");
+
+  currentUsername = username;
+  currentProject = project;
+  saveLastSession();
+
+  setProjectLabel(currentProject);
+  clearChat();
+  renderUsers([]);
+  addSystem(`Connexion au projet "${currentProject}"...`);
+
+  socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
+}
+
+joinBtn.addEventListener("click", joinProject);
+usernameInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") joinProject();
+});
+
+/** =========================
+ *  PROJECTS CRUD
+ *  ========================= */
+if (createProjectBtn && newProjectInput) {
+  createProjectBtn.addEventListener("click", () => {
+    const name = cleanStr(newProjectInput.value);
+    if (!name) return;
+    // server v3.4.1 accepte {name} et "name"
+    socket.emit("createProject", { name }, (ack) => {
+      if (ack?.ok === false) console.warn("createProject ack:", ack);
+    });
+    newProjectInput.value = "";
   });
 
-  if (isImage) parts.push({ type: "image_url", image_url: { url: attachment.url } });
-
-  const completion = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: parts },
-    ],
-    temperature: 0.2,
-    max_tokens: 900,
+  newProjectInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const name = cleanStr(newProjectInput.value);
+      if (!name) return;
+      socket.emit("createProject", { name }, (ack) => {
+        if (ack?.ok === false) console.warn("createProject ack:", ack);
+      });
+      newProjectInput.value = "";
+    }
   });
-
-  const out = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (out) emitSensi(project, `🧠 Analyse Sensi — ${attachment.filename}\n\n${out}`);
 }
 
-// ==================================================
-// SENSI: URL-ONLY WEB + ✅ SEARCH + MEMORY
-// ==================================================
-function stripActionBlock(text) {
-  const t = cleanStr(text);
-  const re = /```json\s*([\s\S]*?)\s*```/i;
-  const m = t.match(re);
-  if (!m) return { cleanText: t, plan: null };
-  const jsonRaw = m[1];
-  let plan = null;
-  try { plan = JSON.parse(jsonRaw); } catch { plan = null; }
-  const cleanText = t.replace(m[0], "").trim();
-  return { cleanText, plan };
-}
-
-async function buildWebBundleFromUrls(userText) {
-  const urls = extractUrlsFromText(userText);
-  const pages = [];
-
-  for (const u of urls.slice(0, 4)) {
-    const page = await extractReadableTextFromUrl(u);
-    if (page.ok && page.text) pages.push(page);
-  }
-
-  return buildWebContext(pages);
-}
-
-async function buildWebBundleFromSearch(userText) {
-  const q = cleanStr(userText).slice(0, 240);
-  const sr = await webSearch(q);
-  if (!sr.ok || !sr.results.length) return { contextText: "", sources: [] };
-  return buildSearchContext(sr.results);
-}
-
-async function maybeExtractAndStoreMemory({ project, username, userText }) {
-  const t = cleanStr(userText);
-  if (!t) return;
-  if (!/(m[ée]morise|souviens[- ]toi|note\s+que|garde\s+en\s+t[êe]te|remember)/i.test(t)) return;
-  if (!hasOpenAI()) return;
-
-  const client = getOpenAIClient();
-  const sys = `
-Tu es un extracteur de faits à mémoriser.
-Retourne uniquement un JSON STRICT.
-Si rien: {"facts":[]}
-Format: {"facts":["...","..."]}
-`.trim();
-
-  const completion = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages: [{ role: "system", content: sys }, { role: "user", content: `Message: ${t}` }],
-    temperature: 0,
-    max_tokens: 220,
+if (deleteProjectBtn) {
+  deleteProjectBtn.addEventListener("click", () => {
+    const p = cleanStr(projectSelect.value);
+    if (!p) return;
+    const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
+    if (!ok) return;
+    socket.emit("deleteProject", { project: p });
   });
-
-  const raw = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (!raw) return;
-
-  let parsed = null;
-  try { parsed = JSON.parse(raw); } catch {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
-  }
-  if (!parsed || !Array.isArray(parsed.facts)) return;
-
-  const added = [];
-  for (const f of parsed.facts.slice(0, 5)) {
-    const ok = addGlobalFact({ text: f, who: username, project });
-    if (ok) added.push(normalizeFactText(f));
-  }
-  if (added.length) emitSensi(project, `🧠 Mémoire globale mise à jour ✅\n- ${added.join("\n- ")}`);
 }
 
-async function sensiAnswer({ project, username, userText }) {
-  if (!hasOpenAI()) {
-    emitSensi(project, "ℹ️ IA non configurée (OPENAI_API_KEY manquante).");
-    return;
-  }
+/** =========================
+ *  UPLOAD
+ *  ========================= */
+async function uploadFile(file) {
+  if (!currentProject) throw new Error("Aucun projet rejoint.");
+  const username = currentUsername || cleanStr(usernameInput.value) || "Anonyme";
 
-  // heure FR “sans ligne côté client” -> déjà géré (direct)
-  const low = cleanStr(userText).toLowerCase();
-  if (/quelle\s+heure|heure\s+est[- ]il/i.test(low) && /(france|paris|fr)\b/i.test(low)) {
-    emitSensi(project, `🕒 En France (Europe/Paris), nous sommes : **${nowInFrance()}**.`);
-    return;
-  }
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("project", currentProject);
+  fd.append("username", username);
+  fd.append("userId", myUserId);
 
-  const client = getOpenAIClient();
-  const memBlock = renderMemoryBlock();
+  const res = await fetch(UPLOAD_ENDPOINT, { method: "POST", body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+  return data;
+}
 
-  // ✅ Build web context:
-  // - If user pasted URLs => extract URL content
-  // - Else, if question looks “current/real-time” and web search key exists => search
-  let webContext = "";
-  let sources = [];
+/** =========================
+ *  SEND
+ *  ========================= */
+function sendTextMessage(text) {
+  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
+  const username = cleanStr(usernameInput.value);
+  if (!username) return alert("Entre un pseudo 🙂");
+
+  const message = cleanStr(text);
+  if (!message) return;
+
+  currentUsername = username;
+  saveLastSession();
+
+  socket.emit("chatMessage", {
+    username,
+    userId: myUserId,
+    message,
+    project: currentProject,
+  });
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
+  const username = cleanStr(usernameInput.value);
+  if (!username) return alert("Entre un pseudo 🙂");
+
+  const message = cleanStr(input.value);
+  const file = fileInput?.files?.[0];
+  const submitBtn = form.querySelector("button[type=submit]");
 
   try {
-    const urls = extractUrlsFromText(userText);
+    if (file) {
+      if (uploadState) uploadState.textContent = `Upload "${file.name}"...`;
+      if (submitBtn) submitBtn.disabled = true;
 
-    if (urls.length) {
-      const built = await buildWebBundleFromUrls(userText);
-      webContext = built.contextText || "";
-      sources = built.sources || [];
-    } else if (shouldWebSearch(userText) && hasWebSearch()) {
-      const built = await buildWebBundleFromSearch(userText);
-      webContext = built.contextText || "";
-      sources = built.sources || [];
+      await uploadFile(file);
+
+      if (uploadState) uploadState.textContent = "Upload OK ✅ (analyse Sensi en cours…)";
+      if (fileInput) fileInput.value = "";
+      input.value = "";
+      input.focus();
+      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2500);
+      return;
+    }
+
+    if (!message) return;
+
+    currentUsername = username;
+    saveLastSession();
+
+    socket.emit("chatMessage", {
+      username,
+      userId: myUserId,
+      message,
+      project: currentProject,
+    });
+
+    input.value = "";
+    input.focus();
+  } catch (err) {
+    console.error(err);
+    alert(`Erreur: ${err?.message || err}`);
+    if (uploadState) uploadState.textContent = "";
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+});
+
+/** =========================
+ *  RECEIVE
+ *  ========================= */
+socket.on("chatHistory", (payload) => {
+  const p = cleanStr(payload?.project);
+  const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+  if (!currentProject || p !== currentProject) return;
+
+  clearChat();
+  if (msgs.length === 0) return addSystem(`Historique vide pour "${currentProject}".`);
+  addSystem(`Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
+
+  for (const m of msgs) {
+    addMessage({
+      id: m.id,
+      ts: m.ts,
+      username: m.username,
+      userId: m.userId,
+      message: m.message,
+      attachment: m.attachment,
+    });
+  }
+});
+
+socket.on("chatMessage", (data) => {
+  if (!currentProject) return;
+  const p = cleanStr(data?.project);
+  if (p && p !== currentProject) return;
+
+  addMessage({
+    id: data?.id,
+    ts: data?.ts,
+    username: data?.username,
+    userId: data?.userId,
+    message: data?.message,
+    attachment: data?.attachment,
+  });
+});
+
+socket.on("messageDeleted", (payload) => {
+  if (!currentProject) return;
+  const p = cleanStr(payload?.project);
+  const mid = Number(payload?.messageId);
+  if (p && p !== currentProject) return;
+  if (!Number.isFinite(mid)) return;
+  removeMessageFromUI(mid);
+});
+
+socket.on("systemMessage", (msg) => {
+  if (!currentProject) return;
+  const p = cleanStr(msg?.project);
+  if (p && p !== currentProject) return;
+  addSystem(msg?.text || "Message système");
+});
+
+socket.on("presenceUpdate", (payload) => {
+  const p = cleanStr(payload?.project);
+  if (!currentProject || !p || p !== currentProject) return;
+  renderUsers(payload?.users);
+});
+
+socket.on("projectsUpdate", (payload) => {
+  const list = Array.isArray(payload?.projects) ? payload.projects : [];
+  setProjectsOptions(list, true);
+
+  const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+  if (want && list.includes(want)) projectSelect.value = want;
+
+  if (currentProject && !list.includes(currentProject)) {
+    currentProject = null;
+    setProjectLabel("—");
+    renderUsers([]);
+    clearChat();
+    addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
+  }
+});
+
+socket.on("projectDeleted", ({ project }) => {
+  const p = cleanStr(project);
+  if (currentProject && p === currentProject) {
+    currentProject = null;
+    setProjectLabel("—");
+    renderUsers([]);
+    clearChat();
+    addSystem(`Le projet "${p}" a été supprimé.`);
+  }
+});
+
+socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
+
+/** =========================
+ *  PROJECTS BOOTSTRAP (v3.4.1)
+ *  ========================= */
+const last = restoreLastSession();
+let projectsLoadedOnce = false;
+
+async function loadProjectsOnce() {
+  if (projectsLoadedOnce) return;
+  projectsLoadedOnce = true;
+
+  // ✅ server v3.4.1 => /projects renvoie un TABLEAU
+  try {
+    const res = await fetch("/projects", { cache: "no-store" });
+    const data = await res.json().catch(() => null);
+
+    const list =
+      Array.isArray(data) ? data :
+      Array.isArray(data?.projects) ? data.projects :
+      [];
+
+    if (list.length > 0) {
+      setProjectsOptions(list, true);
+
+      const want = cleanStr(last?.p);
+      if (want && list.includes(want)) projectSelect.value = want;
+
+      return;
     }
   } catch (e) {
-    logLine("[web]", e?.message || e);
-    webContext = "";
-    sources = [];
+    console.warn("loadProjectsOnce /projects failed:", e?.message || e);
   }
 
-  const system = `
-Tu es Sensi, IA d’assistance dans un chat collaboratif.
+  // fallback socket
+  socket.emit("getProjects");
+}
 
-Règles:
-1) Réponds en français, clair, concret.
-2) Si tu utilises le Contexte WEB, ajoute une section "Sources" à la fin (liens).
-3) Ne fabrique pas de sources.
-4) Si la question demande une info temps réel (heure, actu, prix, etc.) et que tu as des sources, base ta réponse sur elles.
-5) Si tu n’as pas de sources web disponibles, dis-le en 1 phrase et propose 2 alternatives.
-`.trim();
+socket.on("connect", async () => {
+  console.log("✅ Connecté Socket.io", socket.id);
 
-  const user = `
-Projet: ${project}
-Auteur: ${username}
-Message: ${userText}
+  await loadProjectsOnce();
 
-Mémoire globale (faits):
-${memBlock}
+  if (AUTO_JOIN) {
+    const u = cleanStr(usernameInput.value);
+    const p = cleanStr(projectSelect.value);
+    if (u && p && !currentProject) joinProject();
+  }
+});
 
-${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
-`.trim();
+/** =========================
+ *  VOICE + FFT (OVER => SEND)
+ *  ========================= */
+let recognition = null;
+let isListening = false;
 
-  const completion = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    temperature: 0.2,
-    max_tokens: 1000,
+let mediaStream = null;
+let audioCtx = null;
+let analyser = null;
+let fftData = null;
+let fftAnim = null;
+let lastFftTs = 0;
+
+let recorder = null;
+let recChunks = [];
+let recBlob = null;
+let recStopTimer = null;
+
+function ensureVoiceUI() {
+  if (voiceBar) return;
+
+  voiceBar = document.createElement("div");
+  voiceBar.id = "voice-bar";
+  voiceBar.style.cssText = `
+    margin-top:10px; padding:10px;
+    border:1px solid rgba(0,0,0,.12);
+    border-radius:12px;
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+  `;
+
+  btnVoice = document.createElement("button");
+  btnVoice.type = "button";
+  btnVoice.textContent = "🎧 Écouter";
+  btnVoice.style.cssText = "padding:8px 10px; border-radius:10px;";
+
+  btnRec = document.createElement("button");
+  btnRec.type = "button";
+  btnRec.textContent = "⏺️ Enregistrer";
+  btnRec.style.cssText = "padding:8px 10px; border-radius:10px;";
+
+  btnSendRec = document.createElement("button");
+  btnSendRec.type = "button";
+  btnSendRec.textContent = "📤 Envoyer audio";
+  btnSendRec.disabled = true;
+  btnSendRec.style.cssText = "padding:8px 10px; border-radius:10px;";
+
+  voiceHint = document.createElement("span");
+  voiceHint.style.cssText = "color:#666;font-size:12px;";
+  voiceHint.textContent = `Dites “… ${VOICE_OVER_WORD}” pour envoyer.`;
+
+  fftCanvas = document.createElement("canvas");
+  fftCanvas.width = 360;
+  fftCanvas.height = 60;
+  fftCanvas.style.cssText = `
+    width:360px; height:60px;
+    border-radius:10px; border:1px solid rgba(0,0,0,.10);
+  `;
+  fftCtx = fftCanvas.getContext("2d");
+
+  voiceBar.appendChild(btnVoice);
+  voiceBar.appendChild(btnRec);
+  voiceBar.appendChild(btnSendRec);
+  voiceBar.appendChild(voiceHint);
+  if (SHOW_FFT) voiceBar.appendChild(fftCanvas);
+
+  form.parentNode.insertBefore(voiceBar, form.nextSibling);
+
+  btnVoice.addEventListener("click", async () => {
+    if (!ENABLE_VOICE) return;
+    if (isListening) stopListening();
+    else await startListening();
   });
 
-  const rawOut = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (!rawOut) {
-    emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
+  btnRec.addEventListener("click", async () => {
+    if (!ENABLE_VOICE) return;
+    if (recorder && recorder.state === "recording") stopRecording();
+    else await startRecording();
+  });
+
+  btnSendRec.addEventListener("click", async () => {
+    try {
+      if (!recBlob) return;
+      btnSendRec.disabled = true;
+      if (uploadState) uploadState.textContent = "Upload audio…";
+
+      const ext = guessExtFromMime(recBlob.type) || "webm";
+      const file = new File([recBlob], `audio_${Date.now()}.${ext}`, { type: recBlob.type || "audio/webm" });
+      await uploadFile(file);
+
+      recBlob = null;
+      if (uploadState) uploadState.textContent = "Audio envoyé ✅";
+      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2000);
+    } catch (e) {
+      console.error(e);
+      alert(`Erreur upload audio: ${e?.message || e}`);
+      if (uploadState) uploadState.textContent = "";
+    } finally {
+      btnSendRec.disabled = !recBlob;
+    }
+  });
+}
+
+function guessExtFromMime(mime) {
+  const m = String(mime || "");
+  if (m.includes("ogg")) return "ogg";
+  if (m.includes("mp4")) return "mp4";
+  if (m.includes("webm")) return "webm";
+  return "";
+}
+
+function setVoiceButtonState() {
+  if (!btnVoice) return;
+  btnVoice.textContent = isListening ? "🛑 Stop écoute" : "🎧 Écouter";
+}
+
+async function ensureMicStream() {
+  if (mediaStream) return mediaStream;
+  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  return mediaStream;
+}
+
+async function ensureAnalyser() {
+  if (analyser && audioCtx) return;
+  await ensureMicStream();
+
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(mediaStream);
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = FFT_FFTSIZE;
+  analyser.smoothingTimeConstant = FFT_SMOOTHING;
+  analyser.minDecibels = FFT_MIN_DB;
+  analyser.maxDecibels = FFT_MAX_DB;
+
+  src.connect(analyser);
+  fftData = new Uint8Array(analyser.frequencyBinCount);
+}
+
+function stopFft() {
+  if (fftAnim) cancelAnimationFrame(fftAnim);
+  fftAnim = null;
+  lastFftTs = 0;
+  if (fftCtx && fftCanvas) fftCtx.clearRect(0, 0, fftCanvas.width, fftCanvas.height);
+}
+
+function startFft() {
+  if (!SHOW_FFT || !fftCanvas || !fftCtx) return;
+  if (!analyser || !fftData) return;
+  if (fftAnim) return;
+
+  const stepMs = 1000 / Math.max(10, FFT_FPS);
+
+  const draw = (t) => {
+    fftAnim = requestAnimationFrame(draw);
+    if (!analyser) return;
+
+    if (!lastFftTs) lastFftTs = t;
+    if (t - lastFftTs < stepMs) return;
+    lastFftTs = t;
+
+    analyser.getByteFrequencyData(fftData);
+
+    const w = fftCanvas.width;
+    const h = fftCanvas.height;
+
+    fftCtx.clearRect(0, 0, w, h);
+
+    const bins = Math.min(FFT_BINS, fftData.length);
+    const barW = w / bins;
+
+    for (let i = 0; i < bins; i++) {
+      const v = fftData[i] / 255;
+      const barH = Math.max(1, v * h);
+
+      const c = Math.floor(40 + v * 160);
+      fftCtx.fillStyle = `rgb(${c}, ${c + 20}, ${Math.min(255, c + 80)})`;
+      fftCtx.fillRect(i * barW, h - barH, Math.max(1, barW - 1), barH);
+    }
+  };
+
+  fftAnim = requestAnimationFrame(draw);
+}
+
+function normalizeTranscript(s) {
+  return cleanStr(s)
+    .toLowerCase()
+    .replace(/[’']/g, "'")
+    .replace(/[^\p{L}\p{N}\s']/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitOnOver(transcript) {
+  const norm = normalizeTranscript(transcript);
+  const over = normalizeTranscript(VOICE_OVER_WORD);
+
+  if (!norm) return { hasOver: false, cleanedText: "" };
+
+  if (norm === over) return { hasOver: true, cleanedText: "" };
+  if (norm.endsWith(" " + over)) {
+    const cleaned = norm.slice(0, -(over.length + 1)).trim();
+    return { hasOver: true, cleanedText: cleaned };
+  }
+
+  const token = " " + over + " ";
+  const idx = norm.indexOf(token);
+  if (idx >= 0) {
+    const cleaned = norm.slice(0, idx).trim();
+    return { hasOver: true, cleanedText: cleaned };
+  }
+
+  return { hasOver: false, cleanedText: transcript };
+}
+
+async function startListening() {
+  ensureVoiceUI();
+
+  if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+    alert("Reconnaissance vocale non supportée sur ce navigateur.");
     return;
   }
 
-  const { cleanText } = stripActionBlock(rawOut);
-
-  let final = cleanText;
-  if (webContext && sources.length && !/(?:^|\n)Sources\s*:/i.test(final)) {
-    final += `\n\nSources:\n` + sources.map((s) => `- ${s.title} — ${s.url}`).join("\n");
+  try {
+    await ensureMicStream();
+    await ensureAnalyser();
+    startFft();
+  } catch (e) {
+    console.error(e);
+    alert("Micro refusé / indisponible.");
+    return;
   }
 
-  if (final) emitSensi(project, final);
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = recognition || new SR();
 
-  await maybeExtractAndStoreMemory({ project, username, userText }).catch((e) => logLine("[memory]", e?.message || e));
-}
+  // ⚠️ ton "OVER" est en anglais -> garder en-US
+  recognition.lang = "en-US";
+  recognition.interimResults = true;
+  recognition.continuous = true;
+  recognition.maxAlternatives = 1;
 
-// ==================================================
-// PRESENCE + SOCKET EVENTS
-// ==================================================
-const presence = new Map(); // project -> Map(socketId -> {username,userId})
+  recognition.onstart = () => {
+    isListening = true;
+    setVoiceButtonState();
+    if (voiceHint) voiceHint.textContent = `🎧 Écoute… dites “… ${VOICE_OVER_WORD}” pour envoyer.`;
+  };
 
-function getUsers(project) {
-  const map = presence.get(project);
-  if (!map) return [];
-  return Array.from(map.values()).map((v) => v.username).filter(Boolean);
-}
-function emitPresence(project) {
-  io.to(project).emit("presenceUpdate", { project, users: getUsers(project) });
-}
-function broadcastProjects() {
-  io.emit("projectsUpdate", { projects: listProjects() });
-}
+  recognition.onerror = (e) => {
+    console.warn("Speech error:", e?.error);
+    addSystem(`Voice error: ${e?.error || "unknown"}`);
+  };
 
-io.on("connection", (socket) => {
-  logLine("Socket connected:", socket.id);
-  socket.data.userId = "";
-  socket.data.username = "";
-  socket.data.project = "";
-
-  socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
-
-  socket.on("createProject", ({ name }) => {
-    const n = cleanStr(name);
-    if (!isValidProjectName(n)) {
-      return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
+  recognition.onend = () => {
+    if (isListening) {
+      try { recognition.start(); } catch {}
+    } else {
+      stopFft();
     }
-    if (projects.includes(n)) return socket.emit("projectError", { message: "Projet déjà existant." });
-    projects.push(n);
-    projects = Array.from(new Set(projects));
-    saveProjectsNow();
-    broadcastProjects();
-  });
+  };
 
-  socket.on("deleteProject", ({ project }) => {
-    const p = safeProjectKey(project);
-    if (!p) return;
-    if (!projects.includes(p)) return socket.emit("projectError", { message: "Projet introuvable." });
-    if (projects.length <= 1) return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
+  recognition.onresult = (event) => {
+    let interim = "";
+    let final = "";
 
-    io.to(p).emit("projectDeleted", { project: p });
-
-    if (historyByProject[p]) delete historyByProject[p];
-    if (presence.has(p)) presence.delete(p);
-
-    projects = projects.filter((x) => x !== p);
-    if (projects.length === 0) projects = ["test"];
-    saveProjectsNow();
-    writeJSON(HISTORY_FILE, historyByProject);
-    broadcastProjects();
-  });
-
-  socket.on("joinProject", ({ project, username, userId }) => {
-    const p = safeProjectKey(project);
-    const u = cleanStr(username) || "Anonyme";
-    const uid = cleanStr(userId);
-
-    if (!p) return;
-    if (!projects.includes(p)) {
-      socket.emit("projectError", { message: `Projet "${p}" inexistant.` });
-      socket.emit("projectsUpdate", { projects: listProjects() });
-      return;
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const r = event.results[i];
+      const txt = r[0]?.transcript || "";
+      if (r.isFinal) final += txt + " ";
+      else interim += txt + " ";
     }
-    if (!uid) return socket.emit("projectError", { message: "Identifiant utilisateur manquant (userId)." });
 
-    socket.data.userId = uid;
-    socket.data.username = u;
-    socket.data.project = p;
+    const display = cleanStr(final || interim);
+    if (!display) return;
 
-    socket.join(p);
+    if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
 
-    if (!presence.has(p)) presence.set(p, new Map());
-    presence.get(p).set(socket.id, { username: u, userId: uid });
+    if (cleanStr(final)) {
+      const { hasOver, cleanedText } = splitOnOver(final);
 
-    socket.emit("chatHistory", { project: p, messages: getHistory(p) });
-    emitPresence(p);
-    emitSystem(p, `👋 ${u} a rejoint ${p}`);
-  });
+      if (VOICE_APPEND_TO_INPUT && cleanedText) {
+        const cur = cleanStr(input.value);
+        input.value = cur ? `${cur} ${cleanedText}` : cleanedText;
+      }
 
-  socket.on("chatMessage", async ({ project, username, userId, message }) => {
-    const p = safeProjectKey(project);
-    const u = cleanStr(username) || socket.data.username || "Anonyme";
-    const uid = cleanStr(userId) || socket.data.userId;
-    const m = cleanStr(message);
-
-    if (!p || !m) return;
-    if (!projects.includes(p)) return;
-    if (!uid) return;
-
-    const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, userId: uid, message: m };
-    pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
-    io.to(p).emit("chatMessage", msg);
-
-    try {
-      await sensiAnswer({ project: p, username: u, userText: m });
-    } catch (e) {
-      const code = `sensi_${Date.now().toString(36)}`;
-      logLine("[sensi-auto]", code, { message: e?.message, name: e?.name, stack: e?.stack });
-      emitSensi(p,
-        `⚠️ Erreur Sensi (${code}).\n` +
-        `👉 Ouvre /health (AI=enabled?) puis /logs pour le détail.\n` +
-        `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota.`
-      );
-    }
-  });
-
-  socket.on("deleteMessage", ({ project, messageId, userId }) => {
-    const p = safeProjectKey(project);
-    const id = Number(messageId);
-    const uid = cleanStr(userId) || socket.data.userId;
-
-    if (!p || !Number.isFinite(id)) return;
-    if (!projects.includes(p)) return;
-
-    const res = deleteMessageIfAuthor(p, id, uid);
-    if (!res.ok) {
-      if (res.reason === "not_author") socket.emit("projectError", { message: "Suppression refusée : seul l’auteur peut supprimer ce message (sauf Sensi)." });
-      return;
-    }
-    io.to(p).emit("messageDeleted", { project: p, messageId: id });
-  });
-
-  socket.on("disconnect", () => {
-    for (const [proj, map] of presence.entries()) {
-      if (map.has(socket.id)) {
-        map.delete(socket.id);
-        emitPresence(proj);
+      if (VOICE_SEND_ON_OVER && hasOver) {
+        const toSend = cleanStr(input.value) || cleanStr(cleanedText);
+        if (toSend) {
+          sendTextMessage(toSend);
+          input.value = "";
+          input.focus();
+        }
       }
     }
-    logLine("Socket disconnected:", socket.id);
-  });
-});
+  };
 
-// ==================================================
-// PROCESS + START
-// ==================================================
-process.on("unhandledRejection", (err) => logLine("[unhandledRejection]", err?.message || err, err?.stack));
-process.on("uncaughtException", (err) => logLine("[uncaughtException]", err?.message || err, err?.stack));
+  try { recognition.start(); }
+  catch (e) {
+    console.error(e);
+    addSystem("Voice start failed.");
+  }
+}
 
-process.on("SIGTERM", () => {
-  logLine("[SIGTERM] shutting down");
+function stopListening() {
+  isListening = false;
+  setVoiceButtonState();
+  if (voiceHint) voiceHint.textContent = `⏸️ Écoute stoppée.`;
+  try { recognition && recognition.stop(); } catch {}
+  stopFft();
+}
+
+async function startRecording() {
+  ensureVoiceUI();
+
+  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
+  const username = cleanStr(usernameInput.value);
+  if (!username) return alert("Entre un pseudo 🙂");
+
   try {
-    saveProjectsNow();
-    writeJSON(HISTORY_FILE, historyByProject);
-    saveMemoryNow();
-  } catch (_) {}
-  server.close(() => process.exit(0));
-});
+    await ensureMicStream();
+    await ensureAnalyser();
+    startFft();
+  } catch (e) {
+    console.error(e);
+    alert("Micro refusé / indisponible.");
+    return;
+  }
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, "0.0.0.0", () => {
-  logLine("🚀 Server running on", PORT);
-  logLine("Version:", APP_VERSION);
-  logLine("AI:", hasOpenAI() ? "enabled" : "disabled");
-  logLine("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
-  logLine("Web:", webModeLabel());
-  logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
+  const mime = pickAudioMime();
+  recChunks = [];
+  recBlob = null;
+  btnSendRec.disabled = true;
+
+  try {
+    recorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
+  } catch (e) {
+    console.error(e);
+    alert("Enregistrement non supporté sur ce navigateur.");
+    return;
+  }
+
+  recorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size > 0) recChunks.push(ev.data);
+  };
+
+  recorder.onstop = () => {
+    stopFft();
+    const type = recorder?.mimeType || mime || "audio/webm";
+    recBlob = new Blob(recChunks, { type });
+    btnSendRec.disabled = !recBlob;
+    btnRec.textContent = "⏺️ Enregistrer";
+    if (voiceHint) voiceHint.textContent = "🎙️ Audio prêt. Clique « Envoyer audio ».";
+  };
+
+  recorder.start(250);
+  btnRec.textContent = "⏹️ Stop rec";
+  if (voiceHint) voiceHint.textContent = "🎙️ Enregistrement…";
+
+  clearTimeout(recStopTimer);
+  recStopTimer = setTimeout(() => {
+    if (recorder && recorder.state === "recording") stopRecording();
+  }, AUDIO_MAX_SECONDS * 1000);
+}
+
+function stopRecording() {
+  clearTimeout(recStopTimer);
+  recStopTimer = null;
+  try { if (recorder && recorder.state === "recording") recorder.stop(); } catch {}
+}
+
+/** =========================
+ *  INIT VOICE UI
+ *  ========================= */
+(function initVoice() {
+  if (!ENABLE_VOICE) return;
+  ensureVoiceUI();
+  setVoiceButtonState();
+})();
+
+/** =========================
+ *  BONUS: stop mic tracks on unload
+ *  ========================= */
+window.addEventListener("beforeunload", () => {
+  try { stopListening(); } catch {}
+  try { stopRecording(); } catch {}
+  try { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); } catch {}
+  try { if (audioCtx && audioCtx.state !== "closed") audioCtx.close(); } catch {}
 });

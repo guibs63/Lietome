@@ -1,4 +1,4 @@
-<!-- guibs:/index.html (COMPLET) — ULTRA v3.3 aligned (voice + FFT ready) -->
+<!-- guibs:/index.html (COMPLET) — ULTRA v3.4.1 aligned (projects compat + voice + FFT ready) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -202,6 +202,7 @@
     </aside>
   </div>
 
+  <!-- ✅ ordre important: socket.io puis ton client -->
   <script src="/socket.io/socket.io.js"></script>
   <script src="/client.js"></script>
 
@@ -212,9 +213,15 @@
       try {
         const res = await fetch("/health", { cache: "no-store" });
         const data = await res.json();
+
         const ai = data.ai || "unknown";
         const ver = data.version || "?";
-        el.innerHTML = `OK ✅ | <code>${ver}</code> | AI: <code>${ai}</code>`;
+        const web = data.web || "";
+        const deps = data.deps || {};
+        const hasJsdom = deps.jsdom ? "jsdom" : "no-jsdom";
+        const hasRead = deps.readability ? "readability" : "no-readability";
+
+        el.innerHTML = `OK ✅ | <code>${ver}</code> | AI: <code>${ai}</code> | Web: <code>${web}</code> | <code>${hasJsdom}</code>/<code>${hasRead}</code>`;
       } catch (e) {
         el.textContent = "offline / health unreachable";
       }

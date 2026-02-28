@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4 (Railway-safe + LOG FILE + /logs + TAVILY ALWAYS WEB SEARCH) ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.4.1 (Railway-safe + FIX /projects + socket compat) ✅
 "use strict";
 
 const express = require("express");
@@ -69,7 +69,9 @@ app.use(express.static(__dirname));
 // ==================================================
 // CONFIG
 // ==================================================
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4-tavily";
+function cleanEnv(v) { return String(v ?? "").trim(); }
+
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.1";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
@@ -131,8 +133,6 @@ app.use("/generated", express.static(GENERATED_DIR));
 // ==================================================
 // LOGGING (FILE + CONSOLE)
 // ==================================================
-function cleanEnv(v) { return String(v ?? "").trim(); }
-
 function logLine(...args) {
   const safe = args.map((a) => {
     try { return typeof a === "string" ? a : JSON.stringify(a); }
@@ -287,7 +287,10 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
+// ✅ IMPORTANT: compat ancien client => renvoie un TABLEAU
+app.get("/projects", (req, res) => res.json(listProjects()));
+// ✅ nouveau format (si tu veux l’utiliser plus tard)
+app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 app.get("/logs", (req, res) => {
   if (LOGS_TOKEN) {
@@ -545,7 +548,7 @@ async function fetchWithTimeout(url, ms) {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4)",
+        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4.1)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
@@ -1048,6 +1051,17 @@ function broadcastProjects() {
   io.emit("projectsUpdate", { projects: listProjects() });
 }
 
+function normalizeCreatePayload(payload) {
+  // accepte {name:"x"} ou "x"
+  if (typeof payload === "string") return { name: payload };
+  return payload || {};
+}
+function normalizeJoinPayload(payload) {
+  // accepte {project,username,userId} ou "projectName"
+  if (typeof payload === "string") return { project: payload };
+  return payload || {};
+}
+
 io.on("connection", (socket) => {
   logLine("Socket connected:", socket.id);
   socket.data.userId = "";
@@ -1056,15 +1070,30 @@ io.on("connection", (socket) => {
 
   socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
 
-  socket.on("createProject", ({ name }) => {
+  // ✅ compat: "createProject" et "create project"
+  const handleCreateProject = (payload, ack) => {
+    const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
-    if (!isValidProjectName(n)) return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
-    if (projects.includes(n)) return socket.emit("projectError", { message: "Projet déjà existant." });
+    if (!isValidProjectName(n)) {
+      const err = { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" };
+      socket.emit("projectError", err);
+      if (typeof ack === "function") ack({ ok: false, ...err });
+      return;
+    }
+    if (projects.includes(n)) {
+      const err = { message: "Projet déjà existant." };
+      socket.emit("projectError", err);
+      if (typeof ack === "function") ack({ ok: false, ...err });
+      return;
+    }
     projects.push(n);
     projects = Array.from(new Set(projects));
     saveProjectsNow();
     broadcastProjects();
-  });
+    if (typeof ack === "function") ack({ ok: true, project: n, projects: listProjects() });
+  };
+  socket.on("createProject", handleCreateProject);
+  socket.on("create project", handleCreateProject);
 
   socket.on("deleteProject", ({ project }) => {
     const p = safeProjectKey(project);
@@ -1084,7 +1113,10 @@ io.on("connection", (socket) => {
     broadcastProjects();
   });
 
-  socket.on("joinProject", ({ project, username, userId }) => {
+  // ✅ compat: joinProject(obj) et joinProject("name")
+  socket.on("joinProject", (payload) => {
+    const { project, username, userId } = normalizeJoinPayload(payload);
+
     const p = safeProjectKey(project);
     const u = cleanStr(username) || "Anonyme";
     const uid = cleanStr(userId);
