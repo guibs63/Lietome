@@ -28,4 +28,202 @@
     "textract": "^2.5.0",
     "xlsx": "^0.18.5"
   }
-}
+}[1mdiff --git a/client.js b/client.js[m
+[1mindex 2b00f4e..76a3f7f 100644[m
+[1m--- a/client.js[m
+[1m+++ b/client.js[m
+[36m@@ -1,16 +1,17 @@[m
+[31m-// guibs:/client.js (COMPLET) — ULTRA v3.3 CLIENT (compatible server ULTRA v3.3)[m
+[31m-// + VOICE "OVER" + FFT temps réel + Enregistrement + Upload /upload[m
+[31m-//[m
+[31m-// Backend attendu (OK sur ton server):[m
+[31m-// - GET  /projects -> { ok:true, projects:[...] }[m
+[31m-// - POST /upload   -> FormData(file, project, username, userId)[m
+[31m-// - socket:[m
+[31m-//   - "getProjects" -> "projectsUpdate" {projects:[...]}[m
+[31m-//   - "joinProject" {project,username,userId} -> "chatHistory" {project,messages:[...]}[m
+[31m-//   - "chatMessage" {project,username,userId,message} -> broadcast "chatMessage"[m
+[31m-//   - "deleteMessage" {project,messageId,userId} -> "messageDeleted" {project,messageId}[m
+[31m-//   - "presenceUpdate" {project,users:[...]}[m
+[32m+[m[32m// guibs:/client.js (COMPLET) — ULTRA v3.3 CLIENT[m
+[32m+[m[32m// ✅ Aligné server ULTRA v3.3 (Railway-safe)[m
+[32m+[m[32m// ✅ Projets (GET /projects => {ok:true,projects:[...]}) + sockets getProjects/projectsUpdate[m
+[32m+[m[32m// ✅ Join project + chat history + presence[m
+[32m+[m[32m// ✅ Delete message (author-only)[m
+[32m+[m[32m// ✅ Upload fichiers + audio via POST /upload[m
+[32m+[m[32m// ✅ VOICE "OVER" + FFT temps réel + MediaRecorder[m
+[32m+[m[32m// ✅ DEBUG: window.socket + logs + statusbar (#status-text si présent)[m
+ [m
+[32m+[m[32m"use strict";[m
+[32m+[m
+[32m+[m[32m/** =========================[m
+[32m+[m[32m *  SOCKET INIT (GLOBAL)[m
+[32m+[m[32m *  ========================= */[m
+ const socket = io(window.location.origin, {[m
+   transports: ["websocket", "polling"],[m
+   reconnection: true,[m
+[36m@@ -19,6 +20,12 @@[m [mconst socket = io(window.location.origin, {[m
+   timeout: 20000,[m
+ });[m
+ [m
+[32m+[m[32m// ✅ rendre accessible depuis console[m
+[32m+[m[32mwindow.socket = socket;[m
+[32m+[m
+[32m+[m[32m// Debug logs[m
+[32m+[m[32mconsole.log("client.js loaded ✅", { ioType: typeof io });[m
+[32m+[m
+ /** =========================[m
+  *  FLAGS[m
+  *  ========================= */[m
+[36m@@ -84,6 +91,9 @@[m [mconst usersList = document.getElementById("users");[m
+ const usersCount = document.getElementById("users-count");[m
+ const currentProjectLabel = document.getElementById("current-project-label");[m
+ [m
+[32m+[m[32m// Optionnel: statusbar (#status-text)[m
+[32m+[m[32mconst statusText = document.getElementById("status-text");[m
+[32m+[m
+ // VOICE UI (créée dynamiquement)[m
+ let voiceBar = null;[m
+ let btnVoice = null;[m
+[36m@@ -113,6 +123,32 @@[m [mlet fftCtx = null;[m
+   }[m
+ })();[m
+ [m
+[32m+[m[32m/** =========================[m
+[32m+[m[32m *  STATUSBAR HELPERS[m
+[32m+[m[32m *  ========================= */[m
+[32m+[m[32mfunction setStatusBar(txt) {[m
+[32m+[m[32m  if (!statusText) return;[m
+[32m+[m[32m  statusText.textContent = String(txt || "");[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m/** =========================[m
+[32m+[m[32m *  SOCKET DEBUG / STATUS[m
+[32m+[m[32m *  ========================= */[m
+[32m+[m[32msetStatusBar("socket: connecting…");[m
+[32m+[m
+[32m+[m[32msocket.on("connect", () => {[m
+[32m+[m[32m  console.log("✅ socket connected", socket.id);[m
+[32m+[m[32m  setStatusBar(`socket: connected (${socket.id})`);[m
+[32m+[m[32m});[m
+[32m+[m[32msocket.on("disconnect", (reason) => {[m
+[32m+[m[32m  console.log("⚠️ socket disconnected", reason);[m
+[32m+[m[32m  setStatusBar("socket: disconnected");[m
+[32m+[m[32m});[m
+[32m+[m[32msocket.on("connect_error", (err) => {[m
+[32m+[m[32m  console.log("❌ connect_error", err?.message || err);[m
+[32m+[m[32m  setStatusBar(`socket: error (${err?.message || "?"})`);[m
+[32m+[m[32m});[m
+[32m+[m
+ /** =========================[m
+  *  UTILS[m
+  *  ========================= */[m
+[36m@@ -610,10 +646,10 @@[m [masync function loadProjectsOnce() {[m
+   projectsLoadedOnce = true;[m
+ [m
+   try {[m
+[31m-    const res = await fetch("/projects");[m
+[32m+[m[32m    const res = await fetch("/projects", { cache: "no-store" });[m
+     const data = await res.json().catch(() => ({}));[m
+ [m
+[31m-    // ✅ server ULTRA v3.3: { ok:true, projects:[...] }[m
+[32m+[m[32m    // server ULTRA v3.3: { ok:true, projects:[...] }[m
+     const list =[m
+       Array.isArray(data) ? data :[m
+       Array.isArray(data?.projects) ? data.projects :[m
+[36m@@ -787,9 +823,7 @@[m [mfunction stopFft() {[m
+   if (fftAnim) cancelAnimationFrame(fftAnim);[m
+   fftAnim = null;[m
+   lastFftTs = 0;[m
+[31m-  if (fftCtx && fftCanvas) {[m
+[31m-    fftCtx.clearRect(0, 0, fftCanvas.width, fftCanvas.height);[m
+[31m-  }[m
+[32m+[m[32m  if (fftCtx && fftCanvas) fftCtx.clearRect(0, 0, fftCanvas.width, fftCanvas.height);[m
+ }[m
+ [m
+ function startFft() {[m
+[36m@@ -920,9 +954,7 @@[m [masync function startListening() {[m
+     const display = cleanStr(final || interim);[m
+     if (!display) return;[m
+ [m
+[31m-    if (voiceHint) {[m
+[31m-      voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;[m
+[31m-    }[m
+[32m+[m[32m    if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;[m
+ [m
+     if (cleanStr(final)) {[m
+       const { hasOver, cleanedText } = splitOnOver(final);[m
+[36m@@ -943,9 +975,8 @@[m [masync function startListening() {[m
+     }[m
+   };[m
+ [m
+[31m-  try {[m
+[31m-    recognition.start();[m
+[31m-  } catch (e) {[m
+[32m+[m[32m  try { recognition.start(); }[m
+[32m+[m[32m  catch (e) {[m
+     console.error(e);[m
+     addSystem("Voice start failed.");[m
+   }[m
+[36m@@ -1015,9 +1046,7 @@[m [masync function startRecording() {[m
+ function stopRecording() {[m
+   clearTimeout(recStopTimer);[m
+   recStopTimer = null;[m
+[31m-  try {[m
+[31m-    if (recorder && recorder.state === "recording") recorder.stop();[m
+[31m-  } catch {}[m
+[32m+[m[32m  try { if (recorder && recorder.state === "recording") recorder.stop(); } catch {}[m
+ }[m
+ [m
+ /** =========================[m
+[36m@@ -1029,50 +1058,6 @@[m [mfunction stopRecording() {[m
+   setVoiceButtonState();[m
+ })();[m
+ [m
+[31m-/** =========================[m
+[31m- *  BOOTSTRAP PROJECTS[m
+[31m- *  ========================= */[m
+[31m-const last = restoreLastSession();[m
+[31m-let projectsLoadedOnce = false;[m
+[31m-[m
+[31m-async function loadProjectsOnce() {[m
+[31m-  if (projectsLoadedOnce) return;[m
+[31m-  projectsLoadedOnce = true;[m
+[31m-[m
+[31m-  try {[m
+[31m-    const res = await fetch("/projects");[m
+[31m-    const data = await res.json().catch(() => ({}));[m
+[31m-[m
+[31m-    const list =[m
+[31m-      Array.isArray(data) ? data :[m
+[31m-      Array.isArray(data?.projects) ? data.projects :[m
+[31m-      [];[m
+[31m-[m
+[31m-    if (list.length > 0) {[m
+[31m-      setProjectsOptions(list, true);[m
+[31m-      const want = cleanStr(last?.p);[m
+[31m-      if (want && list.includes(want)) projectSelect.value = want;[m
+[31m-      return;[m
+[31m-    }[m
+[31m-  } catch (_) {}[m
+[31m-[m
+[31m-  socket.emit("getProjects");[m
+[31m-}[m
+[31m-[m
+[31m-socket.on("connect", async () => {[m
+[31m-  console.log("✅ Connecté Socket.io", socket.id);[m
+[31m-  await loadProjectsOnce();[m
+[31m-[m
+[31m-  if (AUTO_JOIN) {[m
+[31m-    const u = cleanStr(usernameInput.value);[m
+[31m-    const p = cleanStr(projectSelect.value);[m
+[31m-    if (u && p && !currentProject) joinProject();[m
+[31m-  }[m
+[31m-});[m
+[31m-[m
+[31m-socket.on("disconnect", () => addSystem("Déconnecté du serveur…"));[m
+[31m-socket.on("connect_error", (err) => addSystem(`Erreur connexion: ${err.message}`));[m
+[31m-[m
+ /** =========================[m
+  *  BONUS: stop mic tracks on unload[m
+  *  ========================= */[m

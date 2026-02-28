@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.3 (Railway-safe + LOG FILE + /logs endpoint + better Sensi error codes) ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.4 (Railway-safe + LOG FILE + /logs + TAVILY ALWAYS WEB SEARCH) ✅
 "use strict";
 
 const express = require("express");
@@ -10,6 +10,9 @@ const crypto = require("crypto");
 const multer = require("multer");
 const { Server } = require("socket.io");
 const OpenAI = require("openai");
+
+// Node 18+ has global fetch
+const fetchFn = global.fetch;
 
 // ==================================================
 // OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
@@ -66,7 +69,7 @@ app.use(express.static(__dirname));
 // ==================================================
 // CONFIG
 // ==================================================
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.3-logs";
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4-tavily";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
@@ -86,9 +89,15 @@ const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-m
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// Web behavior (URL-only)
+// URL open
 const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
 const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
+
+// 🔥 TAVILY SEARCH (ALWAYS SEARCH)
+const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || ""); // must be "tavily"
+const TAVILY_API_KEY = cleanEnv(process.env.TAVILY_API_KEY || "");
+const WEB_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_TIMEOUT_MS || 12000);
+const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 5);
 
 // Cache
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
@@ -169,6 +178,10 @@ function isValidProjectName(name) {
 }
 function hasOpenAI() { return Boolean(OPENAI_API_KEY); }
 function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
+
+function hasTavily() {
+  return WEB_SEARCH_PROVIDER === "tavily" && Boolean(TAVILY_API_KEY);
+}
 
 // ==================================================
 // STATE
@@ -268,7 +281,7 @@ app.get("/health", (req, res) => {
       transcribe: OPENAI_TRANSCRIBE_MODEL,
       image: OPENAI_IMAGE_MODEL,
     },
-    web: "url-only (no search provider)",
+    web: hasTavily() ? "tavily-search + url-open" : "url-open only (tavily not configured)",
     audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
     logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
@@ -276,13 +289,10 @@ app.get("/health", (req, res) => {
 
 app.get("/projects", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
-// 🔥 NEW: /logs (200 dernières lignes)
 app.get("/logs", (req, res) => {
   if (LOGS_TOKEN) {
     const token = cleanStr(req.query?.token);
-    if (!token || token !== LOGS_TOKEN) {
-      return res.status(401).send("unauthorized (missing/invalid token)");
-    }
+    if (!token || token !== LOGS_TOKEN) return res.status(401).send("unauthorized (missing/invalid token)");
   }
   const out = tailFile(LOG_FILE, 220);
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -501,7 +511,6 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
   const msg = arr[idx];
   if (cleanStr(msg?.userId) !== reqId) return { ok: false, reason: "not_author" };
 
-  // ✅ si pièce jointe => on supprime aussi le fichier
   const storedAs = cleanStr(msg?.attachment?.storedAs);
   if (storedAs) safeUnlinkUpload(storedAs);
 
@@ -511,7 +520,7 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
 }
 
 // ==================================================
-// URL-ONLY WEB: CACHE + URL OPEN
+// URL OPEN (Readability) + CACHE
 // ==================================================
 const cache = new Map(); // key -> { ts, data }
 function cacheGet(key) {
@@ -531,12 +540,12 @@ async function fetchWithTimeout(url, ms) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const resp = await fetch(url, {
+    const resp = await fetchFn(url, {
       method: "GET",
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.3)",
+        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
@@ -623,7 +632,7 @@ function chunkText(text, chunkSize = 1400, overlap = 180) {
   return chunks.slice(0, 12);
 }
 
-function buildWebContext(pages) {
+function buildContextFromPages(pages) {
   const blocks = [];
   let srcIndex = 1;
 
@@ -663,18 +672,81 @@ function extractUrlsFromText(text) {
 }
 
 // ==================================================
-// TIME (France)
+// 🔥 TAVILY SEARCH (ALWAYS SEARCH) + CACHE
 // ==================================================
-function nowInFrance() {
-  return new Intl.DateTimeFormat("fr-FR", {
-    timeZone: "Europe/Paris",
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date());
+async function tavilySearch(query) {
+  const q = cleanStr(query);
+  if (!q) return { ok: false, provider: "tavily", results: [] };
+  if (!hasTavily()) return { ok: false, provider: "tavily", results: [] };
+
+  const cacheKey = `search:tavily:${q.toLowerCase()}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WEB_SEARCH_TIMEOUT_MS);
+  try {
+    const r = await fetchFn("https://api.tavily.com/search", {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: TAVILY_API_KEY,
+        query: q,
+        max_results: WEB_SEARCH_MAX_RESULTS,
+        include_answer: false,
+        include_raw_content: false,
+      }),
+    });
+
+    const j = await r.json().catch(() => ({}));
+    const results = Array.isArray(j?.results) ? j.results : [];
+
+    const out = {
+      ok: r.ok,
+      provider: "tavily",
+      results: results.slice(0, WEB_SEARCH_MAX_RESULTS).map((it) => ({
+        title: cleanStr(it?.title),
+        url: cleanStr(it?.url),
+        snippet: cleanStr(it?.content || it?.snippet || "").slice(0, 800),
+      })),
+    };
+
+    cacheSet(cacheKey, out);
+    return out;
+  } catch (e) {
+    logLine("[tavilySearch]", e?.message || e);
+    const out = { ok: false, provider: "tavily", results: [] };
+    cacheSet(cacheKey, out);
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildSearchContext(searchRes) {
+  const results = Array.isArray(searchRes?.results) ? searchRes.results : [];
+  if (!results.length) return { contextText: "", sources: [] };
+
+  const blocks = results.slice(0, WEB_SEARCH_MAX_RESULTS).map((r, idx) => ({
+    source_id: idx + 1,
+    title: cleanStr(r.title) || "Résultat",
+    url: cleanStr(r.url),
+    snippet: cleanStr(r.snippet),
+  }));
+
+  const contextText = blocks
+    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nExtrait:\n${b.snippet}`)
+    .join("\n\n");
+
+  const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
+  return { contextText, sources };
+}
+
+function formatSources(sources) {
+  const arr = Array.isArray(sources) ? sources : [];
+  if (!arr.length) return "";
+  return "\n\nSources:\n" + arr.map((s) => `- ${s.title} — ${s.url}`).join("\n");
 }
 
 // ==================================================
@@ -789,8 +861,7 @@ IMPORTANT:
 Réponds en français, concret.
 `.trim();
 
-  const parts = [];
-  parts.push({
+  const parts = [{
     type: "text",
     text:
       `Projet: ${project}\nAuteur upload: ${username}\n` +
@@ -800,7 +871,7 @@ Réponds en français, concret.
         : isAudio
           ? `Transcription (si dispo):\n${extracted || "(transcription vide / indisponible)"}\n`
           : `Extrait (si dispo):\n${extracted || "(extraction vide / indisponible)"}\n`),
-  });
+  }];
 
   if (isImage) parts.push({ type: "image_url", image_url: { url: attachment.url } });
 
@@ -819,30 +890,25 @@ Réponds en français, concret.
 }
 
 // ==================================================
-// SENSI: URL-ONLY WEB + MEMORY
+// SENSI: ALWAYS TAVILY SEARCH + URL OPEN + MEMORY
 // ==================================================
 function stripActionBlock(text) {
   const t = cleanStr(text);
   const re = /```json\s*([\s\S]*?)\s*```/i;
   const m = t.match(re);
   if (!m) return { cleanText: t, plan: null };
-  const jsonRaw = m[1];
-  let plan = null;
-  try { plan = JSON.parse(jsonRaw); } catch { plan = null; }
   const cleanText = t.replace(m[0], "").trim();
-  return { cleanText, plan };
+  return { cleanText, plan: null };
 }
 
-async function buildWebBundle(userText) {
+async function buildUrlOpenBundle(userText) {
   const urls = extractUrlsFromText(userText);
   const pages = [];
-
   for (const u of urls.slice(0, 4)) {
     const page = await extractReadableTextFromUrl(u);
     if (page.ok && page.text) pages.push(page);
   }
-
-  return buildWebContext(pages);
+  return buildContextFromPages(pages);
 }
 
 async function maybeExtractAndStoreMemory({ project, username, userText }) {
@@ -890,38 +956,47 @@ async function sensiAnswer({ project, username, userText }) {
     return;
   }
 
-  const low = cleanStr(userText).toLowerCase();
-  if (/quelle\s+heure|heure\s+est[- ]il/i.test(low) && /(france|paris|fr)\b/i.test(low)) {
-    emitSensi(project, `🕒 En France (Europe/Paris), nous sommes : **${nowInFrance()}**.`);
-    return;
-  }
-
   const client = getOpenAIClient();
   const memBlock = renderMemoryBlock();
 
-  let webContext = "";
-  let sources = [];
+  // 🔥 ALWAYS TAVILY SEARCH (si configuré)
+  let searchContext = "";
+  let searchSources = [];
+  try {
+    if (hasTavily()) {
+      const s = await tavilySearch(userText);
+      const built = buildSearchContext(s);
+      searchContext = built.contextText || "";
+      searchSources = built.sources || [];
+    }
+  } catch (e) {
+    logLine("[always-tavily]", e?.message || e);
+  }
+
+  // URL-open (si l’utilisateur colle des URLs)
+  let urlContext = "";
+  let urlSources = [];
   try {
     const urls = extractUrlsFromText(userText);
     if (urls.length) {
-      const built = await buildWebBundle(userText);
-      webContext = built.contextText || "";
-      sources = built.sources || [];
+      const built = await buildUrlOpenBundle(userText);
+      urlContext = built.contextText || "";
+      urlSources = built.sources || [];
     }
   } catch (e) {
-    logLine("[web-url-only]", e?.message || e);
-    webContext = "";
-    sources = [];
+    logLine("[url-open]", e?.message || e);
   }
+
+  const allSources = [...searchSources, ...urlSources].slice(0, 8);
 
   const system = `
 Tu es Sensi, IA d’assistance dans un chat collaboratif.
 
 Règles:
 1) Réponds en français, clair, concret.
-2) Si tu utilises le Contexte WEB (URLs), ajoute une section "Sources" à la fin.
-3) Ne fabrique pas de sources.
-4) Si demande impossible/refus, explique brièvement et propose 2 alternatives.
+2) Utilise prioritairement le contexte WEB fourni (Tavily + extraits).
+3) Ne fabrique PAS de sources. Si le web n’apporte rien, dis-le clairement.
+4) Ajoute une section "Sources" à la fin si et seulement si des sources sont disponibles.
 `.trim();
 
   const user = `
@@ -932,7 +1007,8 @@ Message: ${userText}
 Mémoire globale (faits):
 ${memBlock}
 
-${webContext ? `\nContexte WEB (extraits URL):\n${webContext}\n` : ""}
+${searchContext ? `\nTAVILY SEARCH:\n${searchContext}\n` : ""}
+${urlContext ? `\nURL OPEN (extraits):\n${urlContext}\n` : ""}
 `.trim();
 
   const completion = await client.chat.completions.create({
@@ -942,23 +1018,15 @@ ${webContext ? `\nContexte WEB (extraits URL):\n${webContext}\n` : ""}
       { role: "user", content: user },
     ],
     temperature: 0.2,
-    max_tokens: 1000,
+    max_tokens: 1100,
   });
 
   const rawOut = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (!rawOut) {
-    emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
-    return;
-  }
+  if (!rawOut) return emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
 
   const { cleanText } = stripActionBlock(rawOut);
-
-  let final = cleanText;
-  if (webContext && sources.length && !/(?:^|\n)Sources\s*:/i.test(final)) {
-    final += `\n\nSources:\n` + sources.map((s) => `- ${s.title} — ${s.url}`).join("\n");
-  }
-
-  if (final) emitSensi(project, final);
+  const final = cleanText + (allSources.length ? formatSources(allSources) : "");
+  emitSensi(project, final);
 
   await maybeExtractAndStoreMemory({ project, username, userText }).catch((e) => logLine("[memory]", e?.message || e));
 }
@@ -990,9 +1058,7 @@ io.on("connection", (socket) => {
 
   socket.on("createProject", ({ name }) => {
     const n = cleanStr(name);
-    if (!isValidProjectName(n)) {
-      return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
-    }
+    if (!isValidProjectName(n)) return socket.emit("projectError", { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
     if (projects.includes(n)) return socket.emit("projectError", { message: "Projet déjà existant." });
     projects.push(n);
     projects = Array.from(new Set(projects));
@@ -1067,7 +1133,7 @@ io.on("connection", (socket) => {
       emitSensi(p,
         `⚠️ Erreur Sensi (${code}).\n` +
         `👉 Ouvre /health (AI=enabled?) puis /logs pour le détail.\n` +
-        `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota.`
+        `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota, TAVILY_API_KEY manquante.`
       );
     }
   });
@@ -1121,6 +1187,6 @@ server.listen(PORT, "0.0.0.0", () => {
   logLine("Version:", APP_VERSION);
   logLine("AI:", hasOpenAI() ? "enabled" : "disabled");
   logLine("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
-  logLine("Web:", "url-only (no search provider)");
+  logLine("Web:", hasTavily() ? "tavily-search + url-open" : "url-open only (tavily not configured)");
   logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
 });
