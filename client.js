@@ -1,12 +1,14 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.4.1 CLIENT
-// ✅ Aligné server ULTRA v3.4.1 (FIX create project + FIX /projects compat)
-// ✅ /projects => tableau ["test", ...] (server v3.4.1)
-// ✅ sockets: getProjects/projectsUpdate + createProject + deleteProject + joinProject
+
+
+---
+// guibs:/client.js (COMPLET) — ULTRA v3.4.2 CLIENT (FIX "over" send + Firefox audio "on")
+// ✅ Aligné server ULTRA v3.4.1 (projects compat + delete Sensi + upload)
+// ✅ Projets (GET /projects => tableau) + sockets getProjects/projectsUpdate
 // ✅ Join project + chat history + presence
-// ✅ Delete message (author-only) + suppression autorisée pour Sensi côté server
+// ✅ Delete message (author-only) + Sensi deletable (server-side)
 // ✅ Upload fichiers + audio via POST /upload
 // ✅ VOICE "OVER" + FFT temps réel + MediaRecorder
-// ✅ DEBUG: window.socket + logs + statusbar (#status-text si présent)
+// ✅ Firefox: AudioContext démarre sur geste user + resume() + capture micro OK
 
 "use strict";
 
@@ -24,6 +26,7 @@ const socket = io(window.location.origin, {
 // ✅ rendre accessible depuis console
 window.socket = socket;
 
+// Debug logs
 console.log("client.js loaded ✅", { ioType: typeof io });
 
 /** =========================
@@ -39,6 +42,9 @@ const VOICE_APPEND_TO_INPUT = true;
 const VOICE_SEND_ON_OVER = true;
 const VOICE_OVER_WORD = "over";
 
+// ✅ tolérances (SpeechRecognition peut transcrire "over" différemment en FR)
+const VOICE_OVER_ALIASES = ["over", "ovaire", "au vert", "auver", "ouvre", "ok over", "ok over."];
+
 // FFT
 const SHOW_FFT = true;
 const FFT_FPS = 30;
@@ -48,7 +54,7 @@ const FFT_FFTSIZE = 2048;
 const FFT_MIN_DB = -90;
 const FFT_MAX_DB = -10;
 
-// Upload audio + fichiers
+// Upload audio
 const UPLOAD_ENDPOINT = "/upload";
 const AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";
 const AUDIO_MAX_SECONDS = 120;
@@ -431,10 +437,7 @@ if (createProjectBtn && newProjectInput) {
   createProjectBtn.addEventListener("click", () => {
     const name = cleanStr(newProjectInput.value);
     if (!name) return;
-    // server v3.4.1 accepte {name} et "name"
-    socket.emit("createProject", { name }, (ack) => {
-      if (ack?.ok === false) console.warn("createProject ack:", ack);
-    });
+    socket.emit("createProject", { name });
     newProjectInput.value = "";
   });
 
@@ -442,9 +445,7 @@ if (createProjectBtn && newProjectInput) {
     if (e.key === "Enter") {
       const name = cleanStr(newProjectInput.value);
       if (!name) return;
-      socket.emit("createProject", { name }, (ack) => {
-        if (ack?.ok === false) console.warn("createProject ack:", ack);
-      });
+      socket.emit("createProject", { name });
       newProjectInput.value = "";
     }
   });
@@ -641,7 +642,7 @@ socket.on("projectDeleted", ({ project }) => {
 socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
 
 /** =========================
- *  PROJECTS BOOTSTRAP (v3.4.1)
+ *  PROJECTS BOOTSTRAP
  *  ========================= */
 const last = restoreLastSession();
 let projectsLoadedOnce = false;
@@ -650,11 +651,11 @@ async function loadProjectsOnce() {
   if (projectsLoadedOnce) return;
   projectsLoadedOnce = true;
 
-  // ✅ server v3.4.1 => /projects renvoie un TABLEAU
   try {
     const res = await fetch("/projects", { cache: "no-store" });
-    const data = await res.json().catch(() => null);
+    const data = await res.json().catch(() => ({}));
 
+    // server v3.4.1: /projects => tableau
     const list =
       Array.isArray(data) ? data :
       Array.isArray(data?.projects) ? data.projects :
@@ -668,11 +669,8 @@ async function loadProjectsOnce() {
 
       return;
     }
-  } catch (e) {
-    console.warn("loadProjectsOnce /projects failed:", e?.message || e);
-  }
+  } catch (_) {}
 
-  // fallback socket
   socket.emit("getProjects");
 }
 
@@ -687,6 +685,9 @@ socket.on("connect", async () => {
     if (u && p && !currentProject) joinProject();
   }
 });
+
+socket.on("disconnect", () => addSystem("Déconnecté du serveur…"));
+socket.on("connect_error", (err) => addSystem(`Erreur connexion: ${err.message}`));
 
 /** =========================
  *  VOICE + FFT (OVER => SEND)
@@ -772,11 +773,9 @@ function ensureVoiceUI() {
       if (!recBlob) return;
       btnSendRec.disabled = true;
       if (uploadState) uploadState.textContent = "Upload audio…";
-
       const ext = guessExtFromMime(recBlob.type) || "webm";
       const file = new File([recBlob], `audio_${Date.now()}.${ext}`, { type: recBlob.type || "audio/webm" });
       await uploadFile(file);
-
       recBlob = null;
       if (uploadState) uploadState.textContent = "Audio envoyé ✅";
       setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2000);
@@ -809,11 +808,19 @@ async function ensureMicStream() {
   return mediaStream;
 }
 
+async function ensureAudioContextResumed() {
+  // ✅ Firefox/Chrome: AudioContext parfois "suspended" tant que pas de geste user
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") {
+    try { await audioCtx.resume(); } catch {}
+  }
+}
+
 async function ensureAnalyser() {
   if (analyser && audioCtx) return;
   await ensureMicStream();
+  await ensureAudioContextResumed();
 
-  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
   const src = audioCtx.createMediaStreamSource(mediaStream);
 
   analyser = audioCtx.createAnalyser();
@@ -862,8 +869,9 @@ function startFft() {
       const v = fftData[i] / 255;
       const barH = Math.max(1, v * h);
 
+      // (pas de couleurs "fixes" critiques — simple gris dynamique)
       const c = Math.floor(40 + v * 160);
-      fftCtx.fillStyle = `rgb(${c}, ${c + 20}, ${Math.min(255, c + 80)})`;
+      fftCtx.fillStyle = `rgb(${c}, ${c}, ${c})`;
       fftCtx.fillRect(i * barW, h - barH, Math.max(1, barW - 1), barH);
     }
   };
@@ -880,23 +888,31 @@ function normalizeTranscript(s) {
     .trim();
 }
 
-function splitOnOver(transcript) {
+function hasOverCommand(transcript) {
   const norm = normalizeTranscript(transcript);
-  const over = normalizeTranscript(VOICE_OVER_WORD);
-
   if (!norm) return { hasOver: false, cleanedText: "" };
 
-  if (norm === over) return { hasOver: true, cleanedText: "" };
-  if (norm.endsWith(" " + over)) {
-    const cleaned = norm.slice(0, -(over.length + 1)).trim();
+  const tokens = norm.split(" ").filter(Boolean);
+  const last = tokens[tokens.length - 1] || "";
+
+  // ✅ match direct
+  const over = normalizeTranscript(VOICE_OVER_WORD);
+  const aliases = (VOICE_OVER_ALIASES || []).map(normalizeTranscript).filter(Boolean);
+
+  const isOver = (w) => w === over || aliases.includes(w);
+
+  // "… over"
+  if (isOver(last)) {
+    const cleaned = tokens.slice(0, -1).join(" ").trim();
     return { hasOver: true, cleanedText: cleaned };
   }
 
-  const token = " " + over + " ";
-  const idx = norm.indexOf(token);
-  if (idx >= 0) {
-    const cleaned = norm.slice(0, idx).trim();
-    return { hasOver: true, cleanedText: cleaned };
+  // "… over …" (rare) => coupe au 1er "over"
+  for (let i = 0; i < tokens.length; i++) {
+    if (isOver(tokens[i])) {
+      const cleaned = tokens.slice(0, i).join(" ").trim();
+      return { hasOver: true, cleanedText: cleaned };
+    }
   }
 
   return { hasOver: false, cleanedText: transcript };
@@ -923,8 +939,8 @@ async function startListening() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   recognition = recognition || new SR();
 
-  // ⚠️ ton "OVER" est en anglais -> garder en-US
-  recognition.lang = "en-US";
+  // ✅ Important: en FR pour mieux reconnaître + "over" en fin
+  recognition.lang = "fr-FR";
   recognition.interimResults = true;
   recognition.continuous = true;
   recognition.maxAlternatives = 1;
@@ -965,7 +981,7 @@ async function startListening() {
     if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
 
     if (cleanStr(final)) {
-      const { hasOver, cleanedText } = splitOnOver(final);
+      const { hasOver, cleanedText } = hasOverCommand(final);
 
       if (VOICE_APPEND_TO_INPUT && cleanedText) {
         const cur = cleanStr(input.value);
@@ -973,7 +989,8 @@ async function startListening() {
       }
 
       if (VOICE_SEND_ON_OVER && hasOver) {
-        const toSend = cleanStr(input.value) || cleanStr(cleanedText);
+        // ✅ priorité: texte nettoyé, sinon input (si déjà rempli)
+        const toSend = cleanStr(cleanedText) || cleanStr(input.value);
         if (toSend) {
           sendTextMessage(toSend);
           input.value = "";

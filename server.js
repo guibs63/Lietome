@@ -1,5 +1,19 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4.1 (Railway-safe + FIX /projects + socket compat) ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.4.2-lite (NO TIME shortcut) ✅
 "use strict";
+
+/**
+ * ✅ Versions:
+ * - /projects => tableau (compat)
+ * - /projects/v2 => { ok:true, projects:[...] }
+ * - create/suppr projets OK
+ * - upload => message + analyse Sensi (pdf/docx/xlsx/text/audio/image)
+ * - web: URL-open + search(Tavily/SerpAPI) auto si dispo
+ * - /health + /logs
+ * - aucune fonction "TIME (France)" / aucun raccourci heure : tout passe par web/IA
+ */
+
+// dotenv (optionnel)
+try { require("dotenv").config(); } catch {}
 
 const express = require("express");
 const cors = require("cors");
@@ -11,16 +25,12 @@ const multer = require("multer");
 const { Server } = require("socket.io");
 const OpenAI = require("openai");
 
-// Node 18+ has global fetch
-const fetchFn = global.fetch;
-
 // ==================================================
 // OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
 // ==================================================
 function optionalRequire(name) {
-  try {
-    return require(name);
-  } catch (e) {
+  try { return require(name); }
+  catch (e) {
     if (e && e.code === "MODULE_NOT_FOUND") return null;
     throw e;
   }
@@ -32,19 +42,10 @@ const readabilityPkg = optionalRequire("@mozilla/readability");
 const JSDOM = jsdomPkg ? jsdomPkg.JSDOM : null;
 const Readability = readabilityPkg ? (readabilityPkg.Readability || readabilityPkg) : null;
 
-// Docs creation (optional)
-const docxPkg = optionalRequire("docx");
-const excelJSPkg = optionalRequire("exceljs");
-const pptxPkg = optionalRequire("pptxgenjs");
-
-const Document = docxPkg ? docxPkg.Document : null;
-const Packer = docxPkg ? docxPkg.Packer : null;
-const Paragraph = docxPkg ? docxPkg.Paragraph : null;
-const HeadingLevel = docxPkg ? docxPkg.HeadingLevel : null;
-const TextRun = docxPkg ? docxPkg.TextRun : null;
-
-const ExcelJS = excelJSPkg || null;
-const PptxGenJS = pptxPkg || null;
+// Docs parsing (optional)
+const pdfParse = optionalRequire("pdf-parse");
+const mammoth = optionalRequire("mammoth");
+const XLSX = optionalRequire("xlsx");
 
 // ==================================================
 // APP INIT
@@ -52,17 +53,11 @@ const PptxGenJS = pptxPkg || null;
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json({ limit: "6mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 // ✅ anti-cache Railway
-app.get("/", (req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  next();
-});
-app.get("/client.js", (req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  next();
-});
+app.get("/", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
+app.get("/client.js", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 
 app.use(express.static(__dirname));
 
@@ -71,7 +66,9 @@ app.use(express.static(__dirname));
 // ==================================================
 function cleanEnv(v) { return String(v ?? "").trim(); }
 
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.1";
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.2-lite";
+
+// storage
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
@@ -85,31 +82,32 @@ const MAX_MESSAGES_PER_PROJECT = Number(process.env.MAX_MESSAGES_PER_PROJECT || 
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 40);
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
-// IA
+// OpenAI
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2-chat-latest";
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_API_KEY = cleanEnv(process.env.OPENAI_API_KEY || "");
 
-// URL open
+// URL open (readability)
 const WEB_PAGE_TIMEOUT_MS = Number(process.env.WEB_PAGE_TIMEOUT_MS || 12000);
 const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 14000);
 
-// 🔥 TAVILY SEARCH (ALWAYS SEARCH)
-const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || ""); // must be "tavily"
+// Web search provider
+const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || "tavily"); // tavily | serpapi
 const TAVILY_API_KEY = cleanEnv(process.env.TAVILY_API_KEY || "");
+const SERPAPI_KEY = cleanEnv(process.env.SERPAPI_KEY || "");
 const WEB_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_TIMEOUT_MS || 12000);
-const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 5);
+const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 6);
 
 // Cache
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 
-// Audio auto transcript message
+// Audio
 const AUDIO_AUTO_TRANSCRIPT_MESSAGE = String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
 const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr";
 const AUDIO_TRANSCRIPT_PREFIX = process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
 
-// (optionnel) Protéger /logs avec un token
+// /logs token (optional)
 const LOGS_TOKEN = cleanEnv(process.env.LOGS_TOKEN || "");
 
 // ==================================================
@@ -131,16 +129,14 @@ app.use("/uploads", express.static(UPLOADS_DIR));
 app.use("/generated", express.static(GENERATED_DIR));
 
 // ==================================================
-// LOGGING (FILE + CONSOLE)
+// LOGGING
 // ==================================================
 function logLine(...args) {
   const safe = args.map((a) => {
     try { return typeof a === "string" ? a : JSON.stringify(a); }
     catch { return String(a); }
   });
-
   const line = `[${new Date().toISOString()}] ${safe.join(" ")}\n`;
-
   try {
     if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
     fs.appendFileSync(LOG_FILE, line, "utf8");
@@ -161,26 +157,28 @@ function tailFile(filePath, maxLines = 200) {
 // ==================================================
 // HELPERS
 // ==================================================
-function readJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
-}
+function readJSON(file, fallback) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; } }
 function writeJSON(file, data) {
   try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
   catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
 }
 function cleanStr(v) { return String(v ?? "").trim(); }
-function safeProjectKey(project) {
-  const p = cleanStr(project);
-  return p ? p.slice(0, 80) : "";
-}
-function isValidProjectName(name) {
-  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
-}
+function safeProjectKey(project) { const p = cleanStr(project); return p ? p.slice(0, 80) : ""; }
+function isValidProjectName(name) { return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name); }
 function hasOpenAI() { return Boolean(OPENAI_API_KEY); }
 function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
 
-function hasTavily() {
-  return WEB_SEARCH_PROVIDER === "tavily" && Boolean(TAVILY_API_KEY);
+function hasWebSearch() {
+  if (WEB_SEARCH_PROVIDER === "serpapi") return Boolean(SERPAPI_KEY);
+  return Boolean(TAVILY_API_KEY);
+}
+function webModeLabel() {
+  if (hasWebSearch()) return `search(${WEB_SEARCH_PROVIDER})`;
+  return `url-open only (${WEB_SEARCH_PROVIDER} not configured)`;
+}
+function tavilyKeyLooksValid() {
+  if (!TAVILY_API_KEY) return false;
+  return TAVILY_API_KEY.length >= 16;
 }
 
 // ==================================================
@@ -229,9 +227,7 @@ function listProjects() {
 // ==================================================
 // MEMORY GLOBAL
 // ==================================================
-function normalizeFactText(t) {
-  return cleanStr(t).replace(/\s+/g, " ").slice(0, 280);
-}
+function normalizeFactText(t) { return cleanStr(t).replace(/\s+/g, " ").slice(0, 280); }
 function addGlobalFact({ text, who = "", project = "" }) {
   const factText = normalizeFactText(text);
   if (!factText) return false;
@@ -251,9 +247,7 @@ function addGlobalFact({ text, who = "", project = "" }) {
   saveMemoryNow();
   return true;
 }
-function memoryTop(n = 14) {
-  return globalMemory.facts.slice(0, n);
-}
+function memoryTop(n = 14) { return globalMemory.facts.slice(0, n); }
 function renderMemoryBlock() {
   const facts = memoryTop(14);
   if (!facts.length) return "Aucune mémoire globale enregistrée.";
@@ -272,24 +266,29 @@ app.get("/health", (req, res) => {
     deps: {
       jsdom: Boolean(JSDOM),
       readability: Boolean(Readability),
-      docx: Boolean(docxPkg),
-      exceljs: Boolean(ExcelJS),
-      pptxgenjs: Boolean(PptxGenJS),
+      pdf_parse: Boolean(pdfParse),
+      mammoth: Boolean(mammoth),
+      xlsx: Boolean(XLSX),
     },
     models: {
       chat: OPENAI_MODEL,
       transcribe: OPENAI_TRANSCRIBE_MODEL,
       image: OPENAI_IMAGE_MODEL,
     },
-    web: hasTavily() ? "tavily-search + url-open" : "url-open only (tavily not configured)",
+    web: webModeLabel(),
+    web_keys: {
+      provider: WEB_SEARCH_PROVIDER,
+      tavilyConfigured: Boolean(TAVILY_API_KEY),
+      tavilyLooksValid: tavilyKeyLooksValid(),
+      serpapiConfigured: Boolean(SERPAPI_KEY),
+    },
     audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
     logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
 });
 
-// ✅ IMPORTANT: compat ancien client => renvoie un TABLEAU
+// compat: ancien client attend un tableau
 app.get("/projects", (req, res) => res.json(listProjects()));
-// ✅ nouveau format (si tu veux l’utiliser plus tard)
 app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 app.get("/logs", (req, res) => {
@@ -340,7 +339,7 @@ function extFromMime(mime, originalName) {
 }
 
 // ==================================================
-// UPLOAD
+// UPLOAD (multer)
 // ==================================================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -356,104 +355,6 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
-app.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    const project = safeProjectKey(req.body?.project);
-    const username = cleanStr(req.body?.username) || "Anonyme";
-    const userId = cleanStr(req.body?.userId);
-
-    if (!project || !projects.includes(project)) return res.status(400).json({ ok: false, error: "Projet invalide." });
-    if (!userId) return res.status(400).json({ ok: false, error: "userId manquant." });
-    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun fichier." });
-
-    const hostBase = `${req.protocol}://${req.get("host")}`;
-    const url = `${hostBase}/uploads/${encodeURIComponent(req.file.filename)}`;
-
-    const attachment = {
-      url,
-      path: `/uploads/${req.file.filename}`,
-      filename: req.file.originalname,
-      storedAs: req.file.filename,
-      mimetype: req.file.mimetype || "application/octet-stream",
-      size: req.file.size,
-    };
-
-    const msg = {
-      id: Date.now(),
-      ts: Date.now(),
-      project,
-      username,
-      userId,
-      message: `📎 ${attachment.filename}`,
-      attachment,
-    };
-
-    pushMessage(project, {
-      id: msg.id,
-      ts: msg.ts,
-      username: msg.username,
-      userId: msg.userId,
-      message: msg.message,
-      attachment: msg.attachment,
-    });
-
-    io.to(project).emit("chatMessage", msg);
-
-    const ext = (path.extname(attachment.filename || "") || "").toLowerCase();
-    const isAudio = isAudioLike(String(attachment.mimetype || ""), ext);
-
-    if (isAudio && AUDIO_AUTO_TRANSCRIPT_MESSAGE) {
-      const localPath = path.join(UPLOADS_DIR, attachment.storedAs);
-
-      (async () => {
-        try {
-          const transcript = await transcribeAudioFile(localPath);
-          const t = cleanStr(transcript);
-          if (t) {
-            const tMsg = {
-              id: Date.now(),
-              ts: Date.now(),
-              project,
-              username,
-              userId,
-              message: `${AUDIO_TRANSCRIPT_PREFIX}${t}`,
-              meta: { kind: "audio_transcript", attachmentUrl: attachment.url, attachmentName: attachment.filename },
-            };
-
-            pushMessage(project, {
-              id: tMsg.id,
-              ts: tMsg.ts,
-              username: tMsg.username,
-              userId: tMsg.userId,
-              message: tMsg.message,
-              meta: tMsg.meta,
-            });
-
-            io.to(project).emit("chatMessage", tMsg);
-
-            try { await sensiAnswer({ project, username, userText: t }); }
-            catch (e) { logLine("[sensi-audio-transcript]", e?.message || e, e?.stack); emitSensi(project, "⚠️ Erreur Sensi sur transcription."); }
-          } else {
-            emitSystem(project, `🎙️ Audio reçu (${attachment.filename}) — transcription indisponible.`);
-          }
-
-          analyzeFileWithSensi({ project, username, attachment }).catch((e) => logLine("[sensi-file]", e?.message || e, e?.stack));
-        } catch (e) {
-          logLine("[audio-transcript-flow]", e?.message || e, e?.stack);
-          analyzeFileWithSensi({ project, username, attachment }).catch((er) => logLine("[sensi-file]", er?.message || er, er?.stack));
-        }
-      })();
-    } else {
-      analyzeFileWithSensi({ project, username, attachment }).catch((e) => logLine("[sensi-file]", e?.message || e, e?.stack));
-    }
-
-    res.json({ ok: true, project, attachment });
-  } catch (e) {
-    logLine("[upload]", e?.message || e, e?.stack);
-    res.status(500).json({ ok: false, error: "Upload error" });
-  }
-});
-
 // ==================================================
 // EMIT HELPERS
 // ==================================================
@@ -467,6 +368,7 @@ function emitSensi(project, text, extra = {}) {
     message: text,
     ...extra,
   };
+
   pushMessage(project, {
     id: msg.id,
     ts: msg.ts,
@@ -476,6 +378,7 @@ function emitSensi(project, text, extra = {}) {
     attachment: msg.attachment,
     meta: msg.meta,
   });
+
   io.to(project).emit("chatMessage", msg);
 }
 function emitSystem(project, text) {
@@ -483,18 +386,24 @@ function emitSystem(project, text) {
 }
 
 // ==================================================
-// DELETE author-only + DELETE ATTACHMENT FILE
+// DELETE: author-only + delete Sensi allowed
 // ==================================================
 function safeUnlinkUpload(storedAs) {
   const name = cleanStr(storedAs);
   if (!name) return;
   if (name.includes("..") || name.includes("/") || name.includes("\\")) return;
   const full = path.join(UPLOADS_DIR, name);
-  try {
-    if (fs.existsSync(full)) fs.unlinkSync(full);
-  } catch (e) {
-    logLine("[unlink]", e?.message || e);
-  }
+  try { if (fs.existsSync(full)) fs.unlinkSync(full); }
+  catch (e) { logLine("[unlink]", e?.message || e); }
+}
+
+function canDeleteMessage(msg, requesterUserId) {
+  const reqId = cleanStr(requesterUserId);
+  if (!reqId) return false;
+  const authorId = cleanStr(msg?.userId);
+  if (authorId && authorId === reqId) return true;
+  if (authorId === "sensi") return true; // ✅ anyone can delete Sensi
+  return false;
 }
 
 function deleteMessageIfAuthor(project, messageId, requesterUserId) {
@@ -512,7 +421,7 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
   if (idx === -1) return { ok: false, reason: "not_found" };
 
   const msg = arr[idx];
-  if (cleanStr(msg?.userId) !== reqId) return { ok: false, reason: "not_author" };
+  if (!canDeleteMessage(msg, reqId)) return { ok: false, reason: "not_author" };
 
   const storedAs = cleanStr(msg?.attachment?.storedAs);
   if (storedAs) safeUnlinkUpload(storedAs);
@@ -523,33 +432,28 @@ function deleteMessageIfAuthor(project, messageId, requesterUserId) {
 }
 
 // ==================================================
-// URL OPEN (Readability) + CACHE
+// URL-OPEN WEB: CACHE + URL OPEN
 // ==================================================
 const cache = new Map(); // key -> { ts, data }
 function cacheGet(key) {
   const v = cache.get(key);
   if (!v) return null;
-  if (Date.now() - v.ts > CACHE_TTL_MS) {
-    cache.delete(key);
-    return null;
-  }
+  if (Date.now() - v.ts > CACHE_TTL_MS) { cache.delete(key); return null; }
   return v.data;
 }
-function cacheSet(key, data) {
-  cache.set(key, { ts: Date.now(), data });
-}
+function cacheSet(key, data) { cache.set(key, { ts: Date.now(), data }); }
 
 async function fetchWithTimeout(url, ms) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const resp = await fetchFn(url, {
+    const resp = await fetch(url, {
       method: "GET",
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4.1)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (compatible; SensiBot/3.4.2-lite)",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
     });
     return resp;
@@ -630,12 +534,12 @@ function chunkText(text, chunkSize = 1400, overlap = 180) {
   let i = 0;
   while (i < t.length) {
     chunks.push(t.slice(i, i + chunkSize));
-    i += (chunkSize - overlap);
+    i += chunkSize - overlap;
   }
   return chunks.slice(0, 12);
 }
 
-function buildContextFromPages(pages) {
+function buildWebContext(pages) {
   const blocks = [];
   let srcIndex = 1;
 
@@ -646,13 +550,7 @@ function buildContextFromPages(pages) {
     const chunks = chunkText(p.text);
     if (!chunks.length) continue;
 
-    blocks.push({
-      source_id: srcIndex,
-      title,
-      url,
-      chunk: chunks[0],
-    });
-
+    blocks.push({ source_id: srcIndex, title, url, chunk: chunks[0] });
     srcIndex += 1;
     if (srcIndex > 6) break;
   }
@@ -675,105 +573,148 @@ function extractUrlsFromText(text) {
 }
 
 // ==================================================
-// 🔥 TAVILY SEARCH (ALWAYS SEARCH) + CACHE
+// WEB SEARCH (Tavily / SerpAPI)
 // ==================================================
-async function tavilySearch(query) {
-  const q = cleanStr(query);
-  if (!q) return { ok: false, provider: "tavily", results: [] };
-  if (!hasTavily()) return { ok: false, provider: "tavily", results: [] };
-
-  const cacheKey = `search:tavily:${q.toLowerCase()}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
+async function fetchJsonWithTimeout(url, options = {}, ms = 10000) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), WEB_SEARCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const r = await fetchFn("https://api.tavily.com/search", {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: TAVILY_API_KEY,
-        query: q,
-        max_results: WEB_SEARCH_MAX_RESULTS,
-        include_answer: false,
-        include_raw_content: false,
-      }),
-    });
-
-    const j = await r.json().catch(() => ({}));
-    const results = Array.isArray(j?.results) ? j.results : [];
-
-    const out = {
-      ok: r.ok,
-      provider: "tavily",
-      results: results.slice(0, WEB_SEARCH_MAX_RESULTS).map((it) => ({
-        title: cleanStr(it?.title),
-        url: cleanStr(it?.url),
-        snippet: cleanStr(it?.content || it?.snippet || "").slice(0, 800),
-      })),
-    };
-
-    cacheSet(cacheKey, out);
-    return out;
-  } catch (e) {
-    logLine("[tavilySearch]", e?.message || e);
-    const out = { ok: false, provider: "tavily", results: [] };
-    cacheSet(cacheKey, out);
-    return out;
+    const resp = await fetch(url, { ...options, signal: controller.signal });
+    const text = await resp.text().catch(() => "");
+    let data = null;
+    try { data = JSON.parse(text); } catch { data = null; }
+    return { ok: resp.ok, status: resp.status, data, raw: text };
   } finally {
     clearTimeout(timer);
   }
 }
 
-function buildSearchContext(searchRes) {
-  const results = Array.isArray(searchRes?.results) ? searchRes.results : [];
-  if (!results.length) return { contextText: "", sources: [] };
+async function webSearch(query) {
+  const q = cleanStr(query);
+  if (!q || !hasWebSearch()) return { ok: false, results: [] };
 
-  const blocks = results.slice(0, WEB_SEARCH_MAX_RESULTS).map((r, idx) => ({
-    source_id: idx + 1,
-    title: cleanStr(r.title) || "Résultat",
-    url: cleanStr(r.url),
-    snippet: cleanStr(r.snippet),
-  }));
+  const cacheKey = `search:${WEB_SEARCH_PROVIDER}:${q.toLowerCase()}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  try {
+    if (WEB_SEARCH_PROVIDER === "serpapi") {
+      const url = `https://serpapi.com/search.json?q=${encodeURIComponent(q)}&engine=google&hl=fr&gl=fr&api_key=${encodeURIComponent(SERPAPI_KEY)}`;
+      const r = await fetchJsonWithTimeout(url, {}, WEB_SEARCH_TIMEOUT_MS);
+      const items = [];
+      const organic = r?.data?.organic_results || [];
+      for (const it of organic.slice(0, WEB_SEARCH_MAX_RESULTS)) {
+        items.push({
+          title: cleanStr(it?.title),
+          url: cleanStr(it?.link),
+          snippet: cleanStr(it?.snippet || it?.snippet_highlighted_words?.join(" ") || ""),
+        });
+      }
+      const out = { ok: true, results: items.filter((x) => x.url).slice(0, WEB_SEARCH_MAX_RESULTS) };
+      cacheSet(cacheKey, out);
+      return out;
+    }
+
+    // default: tavily
+    const url = "https://api.tavily.com/search";
+    const body = {
+      api_key: TAVILY_API_KEY,
+      query: q,
+      search_depth: "basic",
+      max_results: WEB_SEARCH_MAX_RESULTS,
+      include_answer: false,
+      include_raw_content: false,
+      include_images: false,
+    };
+    const r = await fetchJsonWithTimeout(
+      url,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+      WEB_SEARCH_TIMEOUT_MS
+    );
+
+    if (!r.ok) {
+      logLine("[tavily] not ok", { status: r.status, raw: String(r.raw || "").slice(0, 220) });
+      const out = { ok: false, results: [] };
+      cacheSet(cacheKey, out);
+      return out;
+    }
+
+    const items = [];
+    const results = r?.data?.results || [];
+    for (const it of results.slice(0, WEB_SEARCH_MAX_RESULTS)) {
+      items.push({
+        title: cleanStr(it?.title),
+        url: cleanStr(it?.url),
+        snippet: cleanStr(it?.content || it?.snippet || ""),
+      });
+    }
+    const out = { ok: true, results: items.filter((x) => x.url).slice(0, WEB_SEARCH_MAX_RESULTS) };
+    cacheSet(cacheKey, out);
+    return out;
+  } catch (e) {
+    logLine("[webSearch]", e?.message || e);
+    const out = { ok: false, results: [] };
+    cacheSet(cacheKey, out);
+    return out;
+  }
+}
+
+function buildSearchContext(searchResults) {
+  const items = Array.isArray(searchResults) ? searchResults : [];
+  if (!items.length) return { contextText: "", sources: [] };
+
+  const blocks = [];
+  let srcIndex = 1;
+
+  for (const it of items.slice(0, 6)) {
+    const title = cleanStr(it.title) || "Source";
+    const url = cleanStr(it.url);
+    const snippet = cleanStr(it.snippet).slice(0, 1200);
+    if (!url || !snippet) continue;
+
+    blocks.push({ source_id: srcIndex, title, url, chunk: snippet });
+    srcIndex += 1;
+  }
+
+  if (!blocks.length) return { contextText: "", sources: [] };
 
   const contextText = blocks
-    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nExtrait:\n${b.snippet}`)
+    .map((b) => `SOURCE [${b.source_id}]\nTitre: ${b.title}\nURL: ${b.url}\nContenu:\n${b.chunk}`)
     .join("\n\n");
-
   const sources = blocks.map((b) => ({ id: b.source_id, title: b.title, url: b.url }));
   return { contextText, sources };
 }
 
-function formatSources(sources) {
-  const arr = Array.isArray(sources) ? sources : [];
-  if (!arr.length) return "";
-  return "\n\nSources:\n" + arr.map((s) => `- ${s.title} — ${s.url}`).join("\n");
+// Heuristique: quand déclencher une recherche
+function shouldWebSearch(userText) {
+  const t = cleanStr(userText).toLowerCase();
+  if (!t) return false;
+
+  // si URLs fournies => URL-open suffit
+  if (extractUrlsFromText(userText).length) return false;
+
+  return /(\baujourd['’]hui\b|\bmaintenant\b|\bactu\b|\bactualité\b|\bnews\b|\bdernier\b|\bderni[eè]re\b|\brécent\b|\bprix\b|\btaux\b|\bbourse\b|\bmétéo\b|\bscore\b|\brésultat\b|\bwho\s+is\b|\bcurrent\b)/i.test(
+    t
+  );
 }
 
 // ==================================================
-// FILE ANALYSIS (docs + images + audio)
+// FILE EXTRACTION + AUDIO TRANSCRIBE
 // ==================================================
 async function extractTextFromFile(localFilePath, mimetype, originalName) {
   const ext = (path.extname(originalName || "") || "").toLowerCase();
 
   if ((mimetype && mimetype.startsWith("text/")) || isTextLikeExt(ext)) {
-    try {
-      const raw = fs.readFileSync(localFilePath, "utf8");
-      return raw.slice(0, 18000);
-    } catch {
-      return "";
-    }
+    try { return fs.readFileSync(localFilePath, "utf8").slice(0, 22000); }
+    catch { return ""; }
   }
 
   if (mimetype === "application/pdf" || ext === ".pdf") {
-    const pdfParse = optionalRequire("pdf-parse");
     if (!pdfParse) return "";
     try {
       const buf = fs.readFileSync(localFilePath);
       const out = await pdfParse(buf);
-      return String(out?.text || "").slice(0, 18000);
+      return String(out?.text || "").slice(0, 22000);
     } catch (e) {
       logLine("[pdf-parse]", e?.message || e);
       return "";
@@ -781,11 +722,10 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
   }
 
   if (ext === ".docx") {
-    const mammoth = optionalRequire("mammoth");
     if (!mammoth) return "";
     try {
       const result = await mammoth.extractRawText({ path: localFilePath });
-      return String(result?.value || "").slice(0, 18000);
+      return String(result?.value || "").slice(0, 22000);
     } catch (e) {
       logLine("[mammoth]", e?.message || e);
       return "";
@@ -793,7 +733,6 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
   }
 
   if (ext === ".xlsx") {
-    const XLSX = optionalRequire("xlsx");
     if (!XLSX) return "";
     try {
       const wb = XLSX.readFile(localFilePath);
@@ -801,7 +740,7 @@ async function extractTextFromFile(localFilePath, mimetype, originalName) {
       if (!sheetName) return "";
       const ws = wb.Sheets[sheetName];
       const csv = XLSX.utils.sheet_to_csv(ws);
-      return String(csv || "").slice(0, 18000);
+      return String(csv || "").slice(0, 22000);
     } catch (e) {
       logLine("[xlsx-read]", e?.message || e);
       return "";
@@ -821,14 +760,16 @@ async function transcribeAudioFile(localFilePath) {
       file,
       language: AUDIO_TRANSCRIPT_LANGUAGE,
     });
-    const text = cleanStr(resp?.text || "");
-    return text.slice(0, 18000);
+    return cleanStr(resp?.text || "").slice(0, 22000);
   } catch (e) {
     logLine("[transcribe]", e?.message || e, e?.stack);
     return "";
   }
 }
 
+// ==================================================
+// FILE ANALYSIS (Sensi)
+// ==================================================
 async function analyzeFileWithSensi({ project, username, attachment }) {
   if (!hasOpenAI()) {
     emitSensi(project, `ℹ️ IA non configurée. Fichier reçu : ${attachment.filename}`);
@@ -852,19 +793,19 @@ Tu es Sensi.
 Tu reçois un fichier uploadé dans un projet.
 
 Tâches:
-1) Résumer (3-8 lignes)
+1) Résumé (3-8 lignes)
 2) Points clés (bullet points)
 3) Actions recommandées (3-8)
-4) Si image: décrire précisément ce que tu vois.
-5) Si audio: résume la transcription + extrait les décisions/actions.
+4) Si image: description précise
+5) Si audio: résume la transcription + décisions/actions
 
 IMPORTANT:
-- Si tu n'as AUCUN contenu exploitable (extraction/transcription vide), dis-le clairement en 1 phrase,
-  puis propose 3 actions concrètes (ex: ré-uploader, autre format).
+- Si extraction/transcription vide, dis-le clairement (1 phrase) + propose 3 actions concrètes.
 Réponds en français, concret.
 `.trim();
 
-  const parts = [{
+  const parts = [];
+  parts.push({
     type: "text",
     text:
       `Projet: ${project}\nAuteur upload: ${username}\n` +
@@ -874,7 +815,7 @@ Réponds en français, concret.
         : isAudio
           ? `Transcription (si dispo):\n${extracted || "(transcription vide / indisponible)"}\n`
           : `Extrait (si dispo):\n${extracted || "(extraction vide / indisponible)"}\n`),
-  }];
+  });
 
   if (isImage) parts.push({ type: "image_url", image_url: { url: attachment.url } });
 
@@ -893,64 +834,23 @@ Réponds en français, concret.
 }
 
 // ==================================================
-// SENSI: ALWAYS TAVILY SEARCH + URL OPEN + MEMORY
+// SENSI ANSWER (chat) + WEB (url-open + search)
 // ==================================================
-function stripActionBlock(text) {
-  const t = cleanStr(text);
-  const re = /```json\s*([\s\S]*?)\s*```/i;
-  const m = t.match(re);
-  if (!m) return { cleanText: t, plan: null };
-  const cleanText = t.replace(m[0], "").trim();
-  return { cleanText, plan: null };
-}
-
-async function buildUrlOpenBundle(userText) {
+async function buildWebBundleFromUrls(userText) {
   const urls = extractUrlsFromText(userText);
   const pages = [];
   for (const u of urls.slice(0, 4)) {
     const page = await extractReadableTextFromUrl(u);
     if (page.ok && page.text) pages.push(page);
   }
-  return buildContextFromPages(pages);
+  return buildWebContext(pages);
 }
 
-async function maybeExtractAndStoreMemory({ project, username, userText }) {
-  const t = cleanStr(userText);
-  if (!t) return;
-  if (!/(m[ée]morise|souviens[- ]toi|note\s+que|garde\s+en\s+t[êe]te|remember)/i.test(t)) return;
-  if (!hasOpenAI()) return;
-
-  const client = getOpenAIClient();
-  const sys = `
-Tu es un extracteur de faits à mémoriser.
-Retourne uniquement un JSON STRICT.
-Si rien: {"facts":[]}
-Format: {"facts":["...","..."]}
-`.trim();
-
-  const completion = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages: [{ role: "system", content: sys }, { role: "user", content: `Message: ${t}` }],
-    temperature: 0,
-    max_tokens: 220,
-  });
-
-  const raw = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (!raw) return;
-
-  let parsed = null;
-  try { parsed = JSON.parse(raw); } catch {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
-  }
-  if (!parsed || !Array.isArray(parsed.facts)) return;
-
-  const added = [];
-  for (const f of parsed.facts.slice(0, 5)) {
-    const ok = addGlobalFact({ text: f, who: username, project });
-    if (ok) added.push(normalizeFactText(f));
-  }
-  if (added.length) emitSensi(project, `🧠 Mémoire globale mise à jour ✅\n- ${added.join("\n- ")}`);
+async function buildWebBundleFromSearch(userText) {
+  const q = cleanStr(userText).slice(0, 240);
+  const sr = await webSearch(q);
+  if (!sr.ok || !sr.results.length) return { contextText: "", sources: [] };
+  return buildSearchContext(sr.results);
 }
 
 async function sensiAnswer({ project, username, userText }) {
@@ -962,44 +862,43 @@ async function sensiAnswer({ project, username, userText }) {
   const client = getOpenAIClient();
   const memBlock = renderMemoryBlock();
 
-  // 🔥 ALWAYS TAVILY SEARCH (si configuré)
-  let searchContext = "";
-  let searchSources = [];
-  try {
-    if (hasTavily()) {
-      const s = await tavilySearch(userText);
-      const built = buildSearchContext(s);
-      searchContext = built.contextText || "";
-      searchSources = built.sources || [];
-    }
-  } catch (e) {
-    logLine("[always-tavily]", e?.message || e);
-  }
+  // Web context
+  let webContext = "";
+  let sources = [];
 
-  // URL-open (si l’utilisateur colle des URLs)
-  let urlContext = "";
-  let urlSources = [];
   try {
     const urls = extractUrlsFromText(userText);
     if (urls.length) {
-      const built = await buildUrlOpenBundle(userText);
-      urlContext = built.contextText || "";
-      urlSources = built.sources || [];
+      const built = await buildWebBundleFromUrls(userText);
+      webContext = built.contextText || "";
+      sources = built.sources || [];
+    } else if (shouldWebSearch(userText)) {
+      if (hasWebSearch()) {
+        const built = await buildWebBundleFromSearch(userText);
+        webContext = built.contextText || "";
+        sources = built.sources || [];
+      } else {
+        logLine("[web] shouldWebSearch but provider not configured", {
+          provider: WEB_SEARCH_PROVIDER,
+          tavilyConfigured: Boolean(TAVILY_API_KEY),
+          serpapiConfigured: Boolean(SERPAPI_KEY),
+        });
+      }
     }
   } catch (e) {
-    logLine("[url-open]", e?.message || e);
+    logLine("[web]", e?.message || e);
+    webContext = "";
+    sources = [];
   }
-
-  const allSources = [...searchSources, ...urlSources].slice(0, 8);
 
   const system = `
 Tu es Sensi, IA d’assistance dans un chat collaboratif.
 
 Règles:
 1) Réponds en français, clair, concret.
-2) Utilise prioritairement le contexte WEB fourni (Tavily + extraits).
-3) Ne fabrique PAS de sources. Si le web n’apporte rien, dis-le clairement.
-4) Ajoute une section "Sources" à la fin si et seulement si des sources sont disponibles.
+2) Si tu utilises le Contexte WEB, ajoute une section "Sources" à la fin (liens).
+3) Ne fabrique pas de sources.
+4) Si web search non disponible, dis-le en 1 phrase et propose 2 alternatives.
 `.trim();
 
   const user = `
@@ -1010,8 +909,7 @@ Message: ${userText}
 Mémoire globale (faits):
 ${memBlock}
 
-${searchContext ? `\nTAVILY SEARCH:\n${searchContext}\n` : ""}
-${urlContext ? `\nURL OPEN (extraits):\n${urlContext}\n` : ""}
+${webContext ? `\nContexte WEB (extraits):\n${webContext}\n` : ""}
 `.trim();
 
   const completion = await client.chat.completions.create({
@@ -1021,18 +919,83 @@ ${urlContext ? `\nURL OPEN (extraits):\n${urlContext}\n` : ""}
       { role: "user", content: user },
     ],
     temperature: 0.2,
-    max_tokens: 1100,
+    max_tokens: 1000,
   });
 
-  const rawOut = cleanStr(completion?.choices?.[0]?.message?.content);
-  if (!rawOut) return emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
+  const out = cleanStr(completion?.choices?.[0]?.message?.content);
+  if (!out) return emitSensi(project, "⚠️ Je n’ai pas pu générer de réponse.");
 
-  const { cleanText } = stripActionBlock(rawOut);
-  const final = cleanText + (allSources.length ? formatSources(allSources) : "");
+  let final = out;
+  if (webContext && sources.length && !/(?:^|\n)Sources\s*:/i.test(final)) {
+    final += `\n\nSources:\n` + sources.map((s) => `- ${s.title} — ${s.url}`).join("\n");
+  }
+
   emitSensi(project, final);
-
-  await maybeExtractAndStoreMemory({ project, username, userText }).catch((e) => logLine("[memory]", e?.message || e));
 }
+
+// ==================================================
+// UPLOAD ROUTE (with analysis)
+// ==================================================
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    const project = safeProjectKey(req.body?.project);
+    const username = cleanStr(req.body?.username) || "Anonyme";
+    const userId = cleanStr(req.body?.userId);
+
+    if (!project || !projects.includes(project)) return res.status(400).json({ ok: false, error: "Projet invalide." });
+    if (!userId) return res.status(400).json({ ok: false, error: "userId manquant." });
+    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun fichier." });
+
+    const hostBase = `${req.protocol}://${req.get("host")}`;
+    const url = `${hostBase}/uploads/${encodeURIComponent(req.file.filename)}`;
+
+    const attachment = {
+      url,
+      path: `/uploads/${req.file.filename}`,
+      filename: req.file.originalname,
+      storedAs: req.file.filename,
+      mimetype: req.file.mimetype || "application/octet-stream",
+      size: req.file.size,
+    };
+
+    const msg = {
+      id: Date.now(),
+      ts: Date.now(),
+      project,
+      username,
+      userId,
+      message: `📎 ${attachment.filename}`,
+      attachment,
+    };
+
+    pushMessage(project, {
+      id: msg.id,
+      ts: msg.ts,
+      username: msg.username,
+      userId: msg.userId,
+      message: msg.message,
+      attachment: msg.attachment,
+    });
+
+    io.to(project).emit("chatMessage", msg);
+
+    // ✅ analyse en async
+    (async () => {
+      try {
+        await analyzeFileWithSensi({ project, username, attachment });
+      } catch (e) {
+        const code = `sensi_file_${Date.now().toString(36)}`;
+        logLine("[sensi-file]", code, e?.message || e, e?.stack);
+        emitSensi(project, `⚠️ Erreur Sensi (${code}). 👉 /health puis /logs.`);
+      }
+    })();
+
+    res.json({ ok: true, project, attachment });
+  } catch (e) {
+    logLine("[upload]", e?.message || e, e?.stack);
+    res.status(500).json({ ok: false, error: "Upload error" });
+  }
+});
 
 // ==================================================
 // PRESENCE + SOCKET EVENTS
@@ -1052,13 +1015,7 @@ function broadcastProjects() {
 }
 
 function normalizeCreatePayload(payload) {
-  // accepte {name:"x"} ou "x"
   if (typeof payload === "string") return { name: payload };
-  return payload || {};
-}
-function normalizeJoinPayload(payload) {
-  // accepte {project,username,userId} ou "projectName"
-  if (typeof payload === "string") return { project: payload };
   return payload || {};
 }
 
@@ -1070,28 +1027,33 @@ io.on("connection", (socket) => {
 
   socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
 
-  // ✅ compat: "createProject" et "create project"
+  // CREATE PROJECT (+ alias)
   const handleCreateProject = (payload, ack) => {
     const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
+
     if (!isValidProjectName(n)) {
-      const err = { message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" };
-      socket.emit("projectError", err);
-      if (typeof ack === "function") ack({ ok: false, ...err });
+      const err = { ok: false, message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" };
+      socket.emit("projectError", { message: err.message });
+      if (typeof ack === "function") ack(err);
       return;
     }
     if (projects.includes(n)) {
-      const err = { message: "Projet déjà existant." };
-      socket.emit("projectError", err);
-      if (typeof ack === "function") ack({ ok: false, ...err });
+      const err = { ok: false, message: "Projet déjà existant." };
+      socket.emit("projectError", { message: err.message });
+      if (typeof ack === "function") ack(err);
       return;
     }
+
     projects.push(n);
     projects = Array.from(new Set(projects));
     saveProjectsNow();
     broadcastProjects();
-    if (typeof ack === "function") ack({ ok: true, project: n, projects: listProjects() });
+
+    const ok = { ok: true, project: n, projects: listProjects() };
+    if (typeof ack === "function") ack(ok);
   };
+
   socket.on("createProject", handleCreateProject);
   socket.on("create project", handleCreateProject);
 
@@ -1113,10 +1075,7 @@ io.on("connection", (socket) => {
     broadcastProjects();
   });
 
-  // ✅ compat: joinProject(obj) et joinProject("name")
-  socket.on("joinProject", (payload) => {
-    const { project, username, userId } = normalizeJoinPayload(payload);
-
+  socket.on("joinProject", ({ project, username, userId }) => {
     const p = safeProjectKey(project);
     const u = cleanStr(username) || "Anonyme";
     const uid = cleanStr(userId);
@@ -1162,10 +1121,10 @@ io.on("connection", (socket) => {
     } catch (e) {
       const code = `sensi_${Date.now().toString(36)}`;
       logLine("[sensi-auto]", code, { message: e?.message, name: e?.name, stack: e?.stack });
-      emitSensi(p,
-        `⚠️ Erreur Sensi (${code}).\n` +
-        `👉 Ouvre /health (AI=enabled?) puis /logs pour le détail.\n` +
-        `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota, TAVILY_API_KEY manquante.`
+      emitSensi(
+        p,
+        `⚠️ Erreur Sensi (${code}). 👉 /health puis /logs.\n` +
+          `Causes fréquentes: OPENAI_API_KEY manquante/invalid, modèle invalide, quota, TAVILY_API_KEY manquante.`
       );
     }
   });
@@ -1180,7 +1139,7 @@ io.on("connection", (socket) => {
 
     const res = deleteMessageIfAuthor(p, id, uid);
     if (!res.ok) {
-      if (res.reason === "not_author") socket.emit("projectError", { message: "Suppression refusée : seul l’auteur peut supprimer ce message." });
+      if (res.reason === "not_author") socket.emit("projectError", { message: "Suppression refusée : seul l’auteur peut supprimer (sauf Sensi)." });
       return;
     }
     io.to(p).emit("messageDeleted", { project: p, messageId: id });
@@ -1219,6 +1178,7 @@ server.listen(PORT, "0.0.0.0", () => {
   logLine("Version:", APP_VERSION);
   logLine("AI:", hasOpenAI() ? "enabled" : "disabled");
   logLine("Models:", { chat: OPENAI_MODEL, transcribe: OPENAI_TRANSCRIBE_MODEL, image: OPENAI_IMAGE_MODEL });
-  logLine("Web:", hasTavily() ? "tavily-search + url-open" : "url-open only (tavily not configured)");
+  logLine("Web:", webModeLabel());
   logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
+  logLine("Tavily:", { configured: Boolean(TAVILY_API_KEY), looksValid: tavilyKeyLooksValid() });
 });
