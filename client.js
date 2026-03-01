@@ -1,8 +1,5 @@
 
 
-
-
-guibs:/client.js — ULTRA v3.4.3
 // guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Fix "over" send + Firefox audio UX) ✅
 "use strict";
 
@@ -724,7 +721,7 @@ async function startListening() {
   recognition = recognition || new SR();
 
   // Important: "over" en anglais => en-US
-  recognition.lang = "fr-FR"; // dictée FR (on garde le trigger "over"/"ouvre"/"terminé")
+  recognition.lang = "fr-FR"; // Firefox FR (trigger: over/ouvre/terminé) // dictée FR (on garde le trigger "over"/"ouvre"/"terminé")
   recognition.interimResults = true;
   recognition.continuous = true;
   recognition.maxAlternatives = 1;
@@ -750,43 +747,56 @@ async function startListening() {
 
   // Fix: on envoie sur FINAL seulement, en utilisant la détection robuste de "over"
   recognition.onresult = (event) => {
+    // Buffer des segments finalisés (Firefox peut laisser "over" en interim)
+    window.__sensiVoiceFinalBuffer = window.__sensiVoiceFinalBuffer || "";
+
     let interim = "";
-    let final = "";
+    let finalChunk = "";
 
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const r = event.results[i];
       const txt = r[0]?.transcript || "";
-      if (r.isFinal) final += txt + " ";
+      if (r.isFinal) finalChunk += txt + " ";
       else interim += txt + " ";
     }
 
-    const display = cleanStr(final || interim);
-    if (!display) return;
-
-    if (voiceHint) voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
-
-    if (cleanStr(final)) {
-      const { hasOver, withoutOver } = hasOverWord(final);
-
-      // append what was said (excluding "over") to input
-      const toAppend = cleanStr(withoutOver);
-      if (VOICE_APPEND_TO_INPUT && toAppend) {
-        const cur = cleanStr(input.value);
-        input.value = cur ? `${cur} ${toAppend}` : toAppend;
-      }
-
-      if (VOICE_SEND_ON_OVER && hasOver) {
-        const bufferText = cleanStr((input.value || "") + " " + (toAppend || ""));
-    const toSend = bufferText;
-    if (toSend) {
-          sendTextMessage(toSend);
-          input.value = "";
-          input.focus();
-        }
-      }
+    // Accumule uniquement les final pour éviter les répétitions
+    if (cleanStr(finalChunk)) {
+      window.__sensiVoiceFinalBuffer = cleanStr(
+        window.__sensiVoiceFinalBuffer + " " + finalChunk
+      );
     }
-  };
 
+    const combined = cleanStr(window.__sensiVoiceFinalBuffer + " " + interim);
+    if (!combined) return;
+
+    if (voiceHint) {
+      voiceHint.textContent = `🗣️ ${combined.slice(0, 80)}${combined.length > 80 ? "…" : ""}`;
+    }
+
+    // 🔥 Déclencheur "over" (et variantes FR) sur combined (interim + final)
+    const { hasOver, withoutOver, trigger } = hasOverWord(combined);
+
+    if (!hasOver) return;
+
+    // Message à envoyer : ce que l'utilisateur a dicté, sans le trigger
+    const messageToSend = cleanStr(withoutOver);
+    if (!messageToSend) return;
+
+    // Anti double-envoi (Firefox peut répéter la fin)
+    window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
+    const now = Date.now();
+    if (now - window.__sensiLastOverSendTs < 1200) return;
+    window.__sensiLastOverSendTs = now;
+
+    sendTextMessage(messageToSend);
+
+    // Reset buffers/UI
+    window.__sensiVoiceFinalBuffer = "";
+    input.value = "";
+    input.focus();
+    if (voiceHint) voiceHint.textContent = `✅ Envoyé (${trigger || "over"})`;
+  };
   try { recognition.start(); }
   catch (e) {
     console.error(e);
