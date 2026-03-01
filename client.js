@@ -273,59 +273,47 @@ function joinProject() {
 joinBtn.addEventListener("click", joinProject);
 usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
 
-
-async function createProjectWithFallback(name) {
-  const n = cleanStr(name);
-  if (!n) return;
-
-  // 1) Try Socket.IO ACK (fast)
-  let ackResp = null;
-  try {
-    ackResp = await new Promise((resolve) => {
-      let done = false;
-      const t = setTimeout(() => { if (!done) resolve(null); }, 3000);
-      socket.emit("createProject", { name: n }, (resp) => {
-        done = true;
-        clearTimeout(t);
-        resolve(resp || null);
-      });
-    });
-  } catch { ackResp = null; }
-
-  if (ackResp && ackResp.ok === true) return ackResp;
-
-  // 2) Fallback REST (if ACK blocked / proxy issues)
-  try {
-    const res = await fetch("/projects/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: n }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && data?.ok) return data;
-    return { ok: false, message: data?.message || `Erreur création projet (${res.status})` };
-  } catch (e) {
-    return { ok: false, message: e?.message || "Erreur réseau" };
-  }
-}
-
 // create/delete project
 if (createProjectBtn && newProjectInput) {
-  createProjectBtn.addEventListener("click", () => {
-    const name = cleanStr(newProjectInput.value);
+  const requestCreateProject = (nameRaw) => {
+    const name = cleanStr(nameRaw);
     if (!name) return;
-    socket.emit("createProject", { name });
+
+    // Use Socket.IO ACK so the UI updates even if projectsUpdate is delayed/cached
+    socket.emit("createProject", { name }, (resp) => {
+      if (!resp || resp.ok !== true) {
+        alert(resp?.message || "Erreur création projet");
+        return;
+      }
+
+      // Update dropdown immediately
+      const list = Array.isArray(resp.projects) ? resp.projects : [];
+      if (list.length > 0) setProjectsOptions(list, false);
+
+      // Auto-select created project
+      if (resp.project) projectSelect.value = resp.project;
+
+      // Optional: auto-join freshly created project if already connected
+      // (we don't force join; user can click Rejoindre)
+      addSystem(`✅ Projet créé: "${resp.project}"`);
+    });
+  };
+
+  createProjectBtn.addEventListener("click", () => {
+    requestCreateProject(newProjectInput.value);
     newProjectInput.value = "";
+    newProjectInput.focus();
   });
+
   newProjectInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
-      const name = cleanStr(newProjectInput.value);
-      if (!name) return;
-      socket.emit("createProject", { name });
+      e.preventDefault();
+      requestCreateProject(newProjectInput.value);
       newProjectInput.value = "";
     }
   });
 }
+
 
 if (deleteProjectBtn) {
   deleteProjectBtn.addEventListener("click", () => {
@@ -535,6 +523,10 @@ let recognition = null;
 let isListening = false;
 let voiceMode = null; // "speech" | "chunk"
 let chunkRecorder = null;
+let chunkBlobs = []; // Firefox: accumulate chunks for valid container
+let chunkLastSentAt = 0;
+let chunkInFlight = false;
+
 let chunkQueue = Promise.resolve();
 let chunkTextBuffer = "";
 let chunkStartedAt = 0;
@@ -861,38 +853,52 @@ async function startListening() {
 
   chunkRecorder.ondataavailable = (ev) => {
     const blob = ev.data;
-    if (!blob || blob.size < 800) return;
+    if (!blob || blob.size < 1200) return;
 
-    // serialize transcribe requests to keep order
+    // 🔒 IMPORTANT (Firefox): single chunks may be undecodable/corrupted for transcription.
+    // We accumulate chunks and send the *combined* Blob so the container header stays valid.
+    chunkBlobs.push(blob);
+
+    // throttle server calls (avoid spam)
+    const now = Date.now();
+    if (chunkInFlight) return;
+    if (now - chunkLastSentAt < 2500) return;
+    chunkLastSentAt = now;
+
+    const combinedBlob = new Blob(chunkBlobs, { type: blob.type || "audio/ogg" });
+
+    chunkInFlight = true;
     chunkQueue = chunkQueue.then(async () => {
       try {
-        const text = await transcribeAudioBlob(blob);
+        const text = await transcribeAudioBlob(combinedBlob);
         if (!text) return;
 
-        chunkTextBuffer = cleanStr(chunkTextBuffer + " " + text);
+        // overwrite buffer (combined audio would otherwise duplicate)
+        chunkTextBuffer = cleanStr(text);
 
         if (voiceHint) {
           const preview = cleanStr(chunkTextBuffer).slice(0, 80);
           voiceHint.textContent = `🗣️ ${preview}${chunkTextBuffer.length > 80 ? "…" : ""}`;
         }
 
-        // write live into input
         if (VOICE_APPEND_TO_INPUT) {
           const cleaned = stripVoiceTrigger(chunkTextBuffer);
           if (cleaned) input.value = cleaned;
         }
 
-        // trigger send
-        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(text)) {
+        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(chunkTextBuffer)) {
           const msg = cleanStr(stripVoiceTrigger(chunkTextBuffer));
           if (msg) sendTextMessage(msg);
           input.value = "";
           input.focus();
           chunkTextBuffer = "";
+          chunkBlobs = [];
           stopListening();
         }
       } catch (err) {
         console.warn("transcribe chunk failed", err);
+      } finally {
+        chunkInFlight = false;
       }
     });
   };
@@ -904,7 +910,7 @@ async function startListening() {
   isListening = true;
   setVoiceButtonState();
   // collect chunks every 2500ms
-  try { chunkRecorder.start(2500); } catch { chunkRecorder.start(); }
+  try { chunkRecorder.start(1500); } catch { chunkRecorder.start(); }
 }
 
 function stopListening() {
@@ -919,6 +925,8 @@ function stopListening() {
     if (chunkRecorder && chunkRecorder.state === "recording") chunkRecorder.stop();
   } catch {}
   chunkRecorder = null;
+  chunkBlobs = [];
+  chunkInFlight = false;
   voiceMode = null;
 
   stopFft();

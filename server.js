@@ -267,20 +267,6 @@ app.get("/health", (req, res) => {
     audio: { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, language: AUDIO_TRANSCRIPT_LANGUAGE },
     logs: { enabled: true, protectedByToken: Boolean(LOGS_TOKEN) },
   });
-
-app.get("/debug/storage", (req, res) => {
-  res.json({
-    ok: true,
-    STORAGE_ROOT,
-    STORAGE_DIR,
-    PROJECTS_FILE,
-    HISTORY_FILE,
-    hasProjectsFile: fs.existsSync(PROJECTS_FILE),
-    hasHistoryFile: fs.existsSync(HISTORY_FILE),
-    projects: Array.isArray(projects) ? projects : [],
-    historyProjects: historyByProject ? Object.keys(historyByProject).length : 0,
-  });
-});
 });
 
 // ✅ compat: certains clients attendent un tableau JSON direct
@@ -288,26 +274,6 @@ app.get("/projects", (req, res) => res.json(listProjects()));
 // ✅ format “propre” si tu veux l’utiliser côté front moderne
 app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
-
-// ✅ REST fallback for project creation (in case socket ACK is blocked)
-app.post("/projects/create", (req, res) => {
-  try {
-    const name = cleanStr(req.body?.name);
-    if (!isValidProjectName(name)) return res.status(400).json({ ok: false, message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" });
-    if (projects.includes(name)) return res.status(409).json({ ok: false, message: "Projet déjà existant." });
-
-    projects.push(name);
-    projects = Array.from(new Set(projects.map(cleanStr).filter(Boolean)));
-    saveProjectsNow();
-    broadcastProjects();
-    logLine("[createProject] created:", n);
-
-    return res.json({ ok: true, project: name, projects: listProjects() });
-  } catch (e) {
-    logLine("[projects/create]", e?.message || e);
-    return res.status(500).json({ ok: false, message: "Erreur serveur création projet" });
-  }
-});
 app.get("/logs", (req, res) => {
   if (LOGS_TOKEN) {
     const token = cleanStr(req.query?.token);
@@ -355,6 +321,20 @@ function extFromMime(mime, originalName) {
   return "";
 }
 
+
+function sniffAudioFormat(buffer) {
+  try {
+    if (!buffer || buffer.length < 12) return { ext: "webm", mime: "audio/webm" };
+    if (buffer.slice(0, 4).toString("ascii") === "OggS") return { ext: "ogg", mime: "audio/ogg" };
+    if (buffer[0] === 0x1A && buffer[1] === 0x45 && buffer[2] === 0xDF && buffer[3] === 0xA3) return { ext: "webm", mime: "audio/webm" };
+    if (buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WAVE") return { ext: "wav", mime: "audio/wav" };
+    if (buffer.slice(4, 8).toString("ascii") === "ftyp") return { ext: "m4a", mime: "audio/mp4" };
+    return { ext: "webm", mime: "audio/webm" };
+  } catch {
+    return { ext: "webm", mime: "audio/webm" };
+  }
+}
+
 // ==================================================
 // UPLOAD
 // ==================================================
@@ -386,22 +366,27 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
   let tmpPath = null;
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "OPENAI_API_KEY manquante." });
-    if (!req.file) return res.status(400).json({ ok: false, error: "Aucun audio." });
+    if (!req.file || !req.file.buffer) return res.status(400).json({ ok: false, error: "Aucun audio." });
 
-    // Save to /tmp to give the SDK a filename/extension (some formats need it)
+    if (req.file.size < 8 * 1024) {
+      return res.status(400).json({ ok: false, error: "Audio trop court (chunk invalide). Parle un peu plus longtemps puis réessaie." });
+    }
+
+    const sniff = sniffAudioFormat(req.file.buffer);
     const mime = (req.file.mimetype || "").toLowerCase();
-    let ext = "webm";
-    if (mime.includes("wav")) ext = "wav";
-    else if (mime.includes("mpeg") || mime.includes("mp3")) ext = "mp3";
-    else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
-    else if (mime.includes("ogg")) ext = "ogg";
+    const ext =
+      (mime.includes("wav") ? "wav" :
+      (mime.includes("mpeg") || mime.includes("mp3") ? "mp3" :
+      (mime.includes("mp4") || mime.includes("m4a") ? "m4a" :
+      (mime.includes("ogg") ? "ogg" :
+      (mime.includes("webm") ? "webm" : sniff.ext))));
 
     tmpPath = path.join("/tmp", `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`);
     await fs.promises.writeFile(tmpPath, req.file.buffer);
 
     const openai = getOpenAIClient();
+    const model = process.env.OPENAI_TRANSCRIBE_MODEL || process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 
-    const model = process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
     const result = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpPath),
       model,
@@ -412,11 +397,13 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
     return res.json({ ok: true, text: cleanStr(text) });
   } catch (e) {
     console.error("TRANSCRIBE_ERROR:", e);
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-  } finally {
-    if (tmpPath) {
-      fs.promises.unlink(tmpPath).catch(() => {});
+    const msg = e?.message || String(e);
+    if (/corrupted|unsupported|invalid_value/i.test(msg)) {
+      return res.status(400).json({ ok: false, error: "Audio non supporté/illisible. Essaie Chrome/Edge ou enregistre plus longtemps." });
     }
+    return res.status(500).json({ ok: false, error: msg });
+  } finally {
+    if (tmpPath) fs.promises.unlink(tmpPath).catch(() => {});
   }
 });
 
@@ -510,7 +497,6 @@ io.on("connection", (socket) => {
 
   // ✅ createProject({name}) + createProject("name") + alias "create project"
   const handleCreateProject = (payload, ack) => {
-    logLine("[createProject] request:", payload);
     const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
 
