@@ -80,7 +80,10 @@ app.use(express.static(__dirname));
 function cleanEnv(v) { return String(v ?? "").trim(); }
 
 const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.3";
-const STORAGE_DIR = path.join(__dirname, "storage");
+
+// ✅ Persistent storage root (Railway/Render): set DATA_DIR or mount a volume and set RAILWAY_VOLUME_MOUNT_PATH
+const STORAGE_ROOT = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
+const STORAGE_DIR = path.join(STORAGE_ROOT, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
 const MEMORY_FILE = path.join(STORAGE_DIR, "global_memory.json");
@@ -164,6 +167,19 @@ function tailFile(filePath, maxLines = 200) {
     return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
   } catch {
     return "";
+  }
+}
+
+
+function writeJSONAtomic(file, data) {
+  try {
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    logLine("[storage] atomic write failed:", file, e?.message || e);
+    // fallback
+    try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
   }
 }
 

@@ -45,7 +45,6 @@ const AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";
 const AUDIO_MAX_SECONDS = 120;
 
 let currentProject = null;
-    refreshVoiceControls();
 let currentUsername = null;
 
 const seenMessageIds = new Set();
@@ -271,7 +270,6 @@ function joinProject() {
   addSystem(`Connexion au projet "${currentProject}"...`);
 
   socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
-  refreshVoiceControls();
 }
 
 joinBtn.addEventListener("click", joinProject);
@@ -282,14 +280,38 @@ if (createProjectBtn && newProjectInput) {
   createProjectBtn.addEventListener("click", () => {
     const name = cleanStr(newProjectInput.value);
     if (!name) return;
-    socket.emit("createProject", { name });
+    socket.emit("createProject", { name }, (ack) => {
+      if (!ack?.ok) return;
+      // refresh list immediately (server also broadcasts)
+      if (Array.isArray(ack.projects)) setProjectsOptions(ack.projects, true);
+      projectSelect.value = ack.project;
+      // auto-join newly created project
+      if (currentUsername) {
+        currentProject = ack.project;
+        setProjectLabel(currentProject);
+        clearChat();
+        socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
+      }
+    });
     newProjectInput.value = "";
   });
   newProjectInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       const name = cleanStr(newProjectInput.value);
       if (!name) return;
-      socket.emit("createProject", { name });
+      socket.emit("createProject", { name }, (ack) => {
+      if (!ack?.ok) return;
+      // refresh list immediately (server also broadcasts)
+      if (Array.isArray(ack.projects)) setProjectsOptions(ack.projects, true);
+      projectSelect.value = ack.project;
+      // auto-join newly created project
+      if (currentUsername) {
+        currentProject = ack.project;
+        setProjectLabel(currentProject);
+        clearChat();
+        socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
+      }
+    });
       newProjectInput.value = "";
     }
   });
@@ -358,16 +380,7 @@ function stripVoiceTrigger(text) {
 }
 
 function hasVoiceTrigger(text) {
-  const norm = normalizeTranscript(text);
-  if (!norm) return false;
-  for (const t of VOICE_TRIGGERS) {
-    const trig = normalizeTranscript(t);
-    if (!trig) continue;
-    if (norm === trig) return true;
-    if (norm.endsWith(" " + trig)) return true;
-    if ((" " + norm + " ").includes(" " + trig + " ")) return true;
-  }
-  return false;
+  return /\b(over|ouvre|termin[eé]|termine|terminer|terminée|terminee)\b/i.test(text);
 }
 
 // form submit
@@ -558,12 +571,10 @@ function ensureVoiceUI() {
   btnVoice = document.createElement("button");
   btnVoice.type = "button";
   btnVoice.textContent = "🎧 Écouter";
-  btnVoice.disabled = !currentProject;
 
   btnRec = document.createElement("button");
   btnRec.type = "button";
   btnRec.textContent = "⏺️ Enregistrer";
-  btnRec.disabled = !currentProject;
 
   btnSendRec = document.createElement("button");
   btnSendRec.type = "button";
@@ -631,15 +642,6 @@ function guessExtFromMime(mime) {
   if (m.includes("wav")) return "wav";
   if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
   return "";
-}
-
-function refreshVoiceControls() {
-  if (btnVoice) btnVoice.disabled = !currentProject;
-  if (btnRec) btnRec.disabled = !currentProject;
-  if (!currentProject) {
-    try { stopListening(); } catch {}
-    try { stopRecording(); } catch {}
-  }
 }
 
 function setVoiceButtonState() {
@@ -760,16 +762,6 @@ function hasOverWord(transcript) {
 async function startListening() {
   ensureVoiceUI();
 
-  // 🔒 Require a joined project for voice features
-  if (!currentProject) {
-    alert("Rejoins un projet d’abord 🙂");
-    return;
-  }
-  const uname = cleanStr(usernameInput.value);
-  if (!uname) {
-    alert("Entre un pseudo 🙂");
-    return;
-  }
   // Always get mic + FFT first
   try {
     await ensureMicStream();
@@ -881,9 +873,7 @@ async function startListening() {
           voiceHint.textContent = preview ? `🗣️ ${preview}${cleaned.length > 80 ? "…" : ""}` : "🗣️ …";
         }
 
-        if (VOICE_SEND_ON_OVER) {
-        const over = hasOverWord(text);
-        if (over.hasOver) {
+        if (VOICE_SEND_ON_OVER && hasVoiceTrigger(text)) {
           const msg = cleanStr(cleaned);
           if (msg) sendTextMessage(msg);
           input.value = "";
@@ -892,7 +882,6 @@ async function startListening() {
           if (voiceHint) voiceHint.textContent = "✅ Envoyé (Firefox)";
           stopListening();
         }
-      }
       } catch (err) {
         console.warn("transcribe chunk failed", err);
         if (voiceHint) voiceHint.textContent = "⚠️ Transcription échouée (chunk)";
@@ -960,7 +949,6 @@ async function startRecording() {
     recBlob = new Blob(recChunks, { type });
     btnSendRec.disabled = !recBlob;
     btnRec.textContent = "⏺️ Enregistrer";
-  btnRec.disabled = !currentProject;
     if (voiceHint) voiceHint.textContent = "🎙️ Audio prêt. Clique « Envoyer audio ».";
   };
 
@@ -984,7 +972,6 @@ function stopRecording() {
 (function initVoice() {
   if (!ENABLE_VOICE) return;
   ensureVoiceUI();
-  refreshVoiceControls();
   setVoiceButtonState();
 })();
 
