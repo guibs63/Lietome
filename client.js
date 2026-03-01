@@ -1,6 +1,4 @@
 
-Chemin: guibs:/client.js
-
 
 // guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Fix "over" send + Firefox audio UX) ✅
 "use strict";
@@ -468,6 +466,7 @@ socket.on("connect", async () => {
 // =========================
 let recognition = null;
 let isListening = false;
+let voiceBuffer = ""; // accumule les segments finaux (anti-dup + envoi fiable)
 
 let mediaStream = null;
 let audioCtx = null;
@@ -686,6 +685,22 @@ function hasOverWord(transcript) {
   return { hasOver: false, withoutOver: transcript };
 }
 
+
+function triggerVoiceSend(forcedText) {
+  window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
+  const now = Date.now();
+  if (now - window.__sensiLastOverSendTs < 1200) return;
+  window.__sensiLastOverSendTs = now;
+
+  const txt = cleanStr(forcedText || input.value || voiceBuffer);
+  if (!txt) return;
+
+  sendTextMessage(txt);
+  input.value = "";
+  voiceBuffer = "";
+  input.focus();
+  if (voiceHint) voiceHint.textContent = `✅ Envoyé (over)`;
+}
 async function startListening() {
   ensureVoiceUI();
 
@@ -744,37 +759,50 @@ async function startListening() {
     else interim += txt + " ";
   }
 
-  const combined = cleanStr(final || interim);
-  if (!combined) return;
+  const interimClean = cleanStr(interim);
+  const finalClean = cleanStr(final);
 
-  if (voiceHint) voiceHint.textContent = `🗣️ ${combined.slice(0, 80)}${combined.length > 80 ? "…" : ""}`;
+  // Affichage temps réel
+  const display = cleanStr(finalClean || interimClean);
+  if (display && voiceHint) {
+    voiceHint.textContent = `🗣️ ${display.slice(0, 80)}${display.length > 80 ? "…" : ""}`;
+  }
 
-  // ✅ FIX FIREFOX: "over" peut rester en INTERIM et ne jamais passer en FINAL.
-  const { hasOver, withoutOver } = hasOverWord(combined);
-
-  // Ajoute la phrase (sans "over") dans l'input, sans dupliquer
-  const toAppend = cleanStr(withoutOver);
-  if (VOICE_APPEND_TO_INPUT && toAppend) {
-    const cur = cleanStr(input.value);
-    if (!cur || !cur.endsWith(toAppend)) {
-      input.value = cur ? `${cur} ${toAppend}` : toAppend;
+  // Bufferise seulement les FINALS (évite les doublons Firefox)
+  if (finalClean) {
+    const normFinal = normalizeTranscript(finalClean);
+    const normOver = normalizeTranscript(VOICE_OVER_WORD);
+    // retire "over" si jamais il apparaît dans un segment final
+    const { hasOver, withoutOver } = hasOverWord(normFinal);
+    const chunk = cleanStr(withoutOver || "");
+    if (chunk) {
+      voiceBuffer = cleanStr(voiceBuffer ? `${voiceBuffer} ${chunk}` : chunk);
+    }
+    if (hasOver && VOICE_SEND_ON_OVER) {
+      triggerVoiceSend();
+      return;
     }
   }
 
-  // Anti double-envoi si le moteur renvoie plusieurs fois "over"
-  window.__sensiLastOverSendTs = window.__sensiLastOverSendTs || 0;
-  const now = Date.now();
+  // ✅ Détection 'over' même si la phrase reste en INTERIM (cas Firefox fréquent)
+  if (interimClean) {
+    const { hasOver, withoutOver } = hasOverWord(interimClean);
 
-  if (VOICE_SEND_ON_OVER && hasOver) {
-    if (now - window.__sensiLastOverSendTs < 1200) return;
-    window.__sensiLastOverSendTs = now;
+    // pour confort, on pré-remplit l'input (sans spammer)
+    const chunk = cleanStr(withoutOver || "");
+    if (VOICE_APPEND_TO_INPUT && chunk) {
+      const cur = cleanStr(input.value);
+      if (!cur || !cur.endsWith(chunk)) {
+        input.value = cur ? `${cur} ${chunk}` : chunk;
+      }
+    }
 
-    const toSend = cleanStr(input.value);
-    if (toSend) {
-      sendTextMessage(toSend);
-      input.value = "";
-      input.focus();
-      if (voiceHint) voiceHint.textContent = `✅ Envoyé (over)`;
+    if (hasOver && VOICE_SEND_ON_OVER) {
+      // combine buffer + chunk, puis envoie
+      const combinedMsg = cleanStr(voiceBuffer ? `${voiceBuffer} ${chunk}` : chunk);
+      voiceBuffer = ""; // reset avant envoi
+      triggerVoiceSend(combinedMsg);
+      return;
     }
   }
 };
