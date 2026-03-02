@@ -1,6 +1,13 @@
 
+But : corriger le crash Railway « SyntaxError: Invalid or unexpected token » sur /transcribe.
+Points vérifiés :
+    • Aucun caractère échappé \" dans le code JavaScript.
+    • LogLine /transcribe avec guillemets standards "..." (pas de “ ”).
+    • Model STT lu depuis OPENAI_TRANSCRIBE_MODEL (ou override env OPENAI_TRANSCRIBE_MODEL).
 
-// 
+Fichier complet (copier/coller tel quel)
+// guibs:/server.js (COMPLET) — ULTRA v3.4.3 — corrigé Railway ✅
+// Fix principal: supprimer tout \\" (copier-coller échappé) dans le code JS, sinon Node crash au parse.
 "use strict";
 
 const express = require("express");
@@ -23,15 +30,10 @@ function optionalRequire(name) {
   try {
     return require(name);
   } catch (e) {
-    // soft-fail: don't crash app on optional deps
     const msg = String(e?.message || e || "");
     const code = e?.code;
     if (code === "MODULE_NOT_FOUND") return null;
-
-    // Known runtime crashes in server environments (Railway) for PDF/canvas polyfills:
     if (/DOMMatrix|ImageData|Path2D/i.test(msg)) return null;
-
-    // Also treat any require-time error as optional (safer for prod)
     return null;
   }
 }
@@ -100,6 +102,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const WEB_SEARCH_PROVIDER = cleanEnv(process.env.WEB_SEARCH_PROVIDER || "tavily"); // tavily | serpapi
 const TAVILY_API_KEY = cleanEnv(process.env.TAVILY_API_KEY || "");
 const SERPAPI_KEY = cleanEnv(process.env.SERPAPI_KEY || "");
+
 const WEB_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_TIMEOUT_MS || 12000);
 const WEB_SEARCH_MAX_RESULTS = Number(process.env.WEB_SEARCH_MAX_RESULTS || 6);
 
@@ -252,7 +255,6 @@ app.get("/health", (req, res) => {
       docx: Boolean(docxPkg),
       exceljs: Boolean(ExcelJS),
       pptxgenjs: Boolean(PptxGenJS),
-      // NOTE: pdf-parse est chargé à la demande (et peut être désactivé)
       pdfParse: Boolean(optionalRequire("pdf-parse")),
     },
     models: {
@@ -266,9 +268,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ✅ compat: certains clients attendent un tableau JSON direct
 app.get("/projects", (req, res) => res.json(listProjects()));
-// ✅ format “propre” si tu veux l’utiliser côté front moderne
 app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 app.get("/logs", (req, res) => {
@@ -290,13 +290,6 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 // ==================================================
 // FILE HELPERS
 // ==================================================
-function isTextLikeExt(ext) {
-  return [".txt", ".md", ".csv", ".log", ".json", ".yaml", ".yml"].includes(ext);
-}
-function isAudioLike(mimetype, ext) {
-  if (mimetype && mimetype.startsWith("audio/")) return true;
-  return [".mp3", ".wav", ".m4a", ".aac", ".ogg", ".webm", ".flac", ".mp4", ".mka"].includes(ext);
-}
 function extFromMime(mime, originalName) {
   const fallback = path.extname(originalName || "").slice(0, 10);
   if (fallback) return fallback;
@@ -335,7 +328,6 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
-
 // =======================
 // Speech-to-text (Firefox fallback)
 // POST /transcribe  (multipart/form-data: audio=<file>)
@@ -347,12 +339,20 @@ const memUpload = multer({
 
 app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
   let tmpPath = null;
-  try { logLine(\"[transcribe]\", { size: req.file?.size, mimetype: req.file?.mimetype, originalname: req.file?.originalname }); } catch {}
+
+  // ✅ IMPORTANT: ce log DOIT être en guillemets normaux "..." (pas de \\" ni de “ ”)
+  try {
+    logLine("[transcribe]", {
+      size: req.file?.size,
+      mimetype: req.file?.mimetype,
+      originalname: req.file?.originalname,
+    });
+  } catch {}
+
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "OPENAI_API_KEY manquante." });
     if (!req.file) return res.status(400).json({ ok: false, error: "Aucun audio." });
 
-    // Save to /tmp to give the SDK a filename/extension (some formats need it)
     const mime = (req.file.mimetype || "").toLowerCase();
     let ext = "webm";
     if (mime.includes("wav")) ext = "wav";
@@ -364,8 +364,8 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
     await fs.promises.writeFile(tmpPath, req.file.buffer);
 
     const openai = getOpenAIClient();
+    const model = process.env.OPENAI_TRANSCRIBE_MODEL || OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 
-    const model = process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
     const result = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpPath),
       model,
@@ -378,9 +378,7 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
     console.error("TRANSCRIBE_ERROR:", e);
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
   } finally {
-    if (tmpPath) {
-      fs.promises.unlink(tmpPath).catch(() => {});
-    }
+    if (tmpPath) fs.promises.unlink(tmpPath).catch(() => {});
   }
 });
 
@@ -426,8 +424,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     });
 
     io.to(project).emit("chatMessage", msg);
-
-    // Note: tu peux remettre ici ton flow d'analyse Sensi si tu veux
     res.json({ ok: true, project, attachment });
   } catch (e) {
     logLine("[upload]", e?.message || e, e?.stack);
@@ -435,9 +431,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// ==================================================
-// EMIT HELPERS
-// ==================================================
 function emitSystem(project, text) {
   io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
 }
@@ -472,7 +465,6 @@ io.on("connection", (socket) => {
 
   socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
 
-  // ✅ createProject({name}) + createProject("name") + alias "create project"
   const handleCreateProject = (payload, ack) => {
     const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
