@@ -1,13 +1,8 @@
 
-But : corriger le crash Railway « SyntaxError: Invalid or unexpected token » sur /transcribe.
-Points vérifiés :
-    • Aucun caractère échappé \" dans le code JavaScript.
-    • LogLine /transcribe avec guillemets standards "..." (pas de “ ”).
-    • Model STT lu depuis OPENAI_TRANSCRIBE_MODEL (ou override env OPENAI_TRANSCRIBE_MODEL).
 
-Fichier complet (copier/coller tel quel)
+<script>
 // guibs:/server.js (COMPLET) — ULTRA v3.4.3 — corrigé Railway ✅
-// Fix principal: supprimer tout \\" (copier-coller échappé) dans le code JS, sinon Node crash au parse.
+// Fix principal: supprimer tout \" (copier-coller échappé) dans le code JS, sinon Node crash au parse.
 "use strict";
 
 const express = require("express");
@@ -67,7 +62,7 @@ app.use(cors());
 app.use(express.json({ limit: "6mb" }));
 
 // ✅ anti-cache Railway
-app.get("/", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
+<app.get("/", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 app.get("/client.js", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 app.get("/index.html", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 
@@ -340,7 +335,7 @@ const memUpload = multer({
 app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
   let tmpPath = null;
 
-  // ✅ IMPORTANT: ce log DOIT être en guillemets normaux "..." (pas de \\" ni de “ ”)
+  // ✅ IMPORTANT: ce log DOIT être en guillemets normaux "..." (pas de \" ni de “ ”)
   try {
     logLine("[transcribe]", {
       size: req.file?.size,
@@ -590,3 +585,4 @@ server.listen(PORT, "0.0.0.0", () => {
   logLine("Web:", webModeLabel());
   logLine("Audio:", { autoTranscriptMessage: AUDIO_AUTO_TRANSCRIPT_MESSAGE, lang: AUDIO_TRANSCRIPT_LANGUAGE });
 });
+</script>
