@@ -1,8 +1,5 @@
-
-
-
 // guibs:/server.js (COMPLET) — ULTRA v3.4.3 — corrigé Railway ✅
-// Fix principal: supprimer tout \" (copier-coller échappé) dans le code JS, sinon Node crash au parse.
+// Fix principal: supprimer tout \" et tout caractère parasite (ex: "<" avant app.get) sinon Node crash au parse.
 "use strict";
 
 const express = require("express");
@@ -61,17 +58,28 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
 
-// ✅ anti-cache Railway
-<app.get("/", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
-app.get("/client.js", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
-app.get("/index.html", (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
+// ✅ anti-cache Railway (CORRIGÉ: pas de "<" ici)
+app.get("/", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+app.get("/client.js", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+app.get("/index.html", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
 
 app.use(express.static(__dirname));
 
 // ==================================================
 // CONFIG
 // ==================================================
-function cleanEnv(v) { return String(v ?? "").trim(); }
+function cleanEnv(v) {
+  return String(v ?? "").trim();
+}
 
 const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.3";
 const STORAGE_DIR = path.join(__dirname, "storage");
@@ -89,7 +97,8 @@ const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 // IA
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.2-chat-latest";
-const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+const OPENAI_TRANSCRIBE_MODEL =
+  process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
@@ -109,9 +118,11 @@ const WEB_MAX_CHARS_PER_PAGE = Number(process.env.WEB_MAX_CHARS_PER_PAGE || 1400
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 
 // Audio auto transcript message
-const AUDIO_AUTO_TRANSCRIPT_MESSAGE = String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
+const AUDIO_AUTO_TRANSCRIPT_MESSAGE =
+  String(process.env.AUDIO_AUTO_TRANSCRIPT_MESSAGE || "1") !== "0";
 const AUDIO_TRANSCRIPT_LANGUAGE = process.env.AUDIO_TRANSCRIPT_LANGUAGE || "fr";
-const AUDIO_TRANSCRIPT_PREFIX = process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
+const AUDIO_TRANSCRIPT_PREFIX =
+  process.env.AUDIO_TRANSCRIPT_PREFIX || "🗣️ (transcription) ";
 
 // (optionnel) Protéger /logs avec un token
 const LOGS_TOKEN = cleanEnv(process.env.LOGS_TOKEN || "");
@@ -124,9 +135,12 @@ function ensureDirs() {
   if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   if (!fs.existsSync(GENERATED_DIR)) fs.mkdirSync(GENERATED_DIR, { recursive: true });
 
-  if (!fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
-  if (!fs.existsSync(PROJECTS_FILE)) fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["test"], null, 2), "utf8");
-  if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({ facts: [] }, null, 2), "utf8");
+  if (!fs.existsSync(HISTORY_FILE))
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify({}, null, 2), "utf8");
+  if (!fs.existsSync(PROJECTS_FILE))
+    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(["test"], null, 2), "utf8");
+  if (!fs.existsSync(MEMORY_FILE))
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify({ facts: [] }, null, 2), "utf8");
   if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "", "utf8");
 }
 ensureDirs();
@@ -139,8 +153,11 @@ app.use("/generated", express.static(GENERATED_DIR));
 // ==================================================
 function logLine(...args) {
   const safe = args.map((a) => {
-    try { return typeof a === "string" ? a : JSON.stringify(a); }
-    catch { return String(a); }
+    try {
+      return typeof a === "string" ? a : JSON.stringify(a);
+    } catch {
+      return String(a);
+    }
   });
 
   const line = `[${new Date().toISOString()}] ${safe.join(" ")}\n`;
@@ -166,13 +183,22 @@ function tailFile(filePath, maxLines = 200) {
 // HELPERS
 // ==================================================
 function readJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
 }
 function writeJSON(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
-  catch (e) { logLine("[storage] write failed:", file, e?.message || e); }
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+  } catch (e) {
+    logLine("[storage] write failed:", file, e?.message || e);
+  }
 }
-function cleanStr(v) { return String(v ?? "").trim(); }
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
 function safeProjectKey(project) {
   const p = cleanStr(project);
   return p ? p.slice(0, 80) : "";
@@ -180,8 +206,12 @@ function safeProjectKey(project) {
 function isValidProjectName(name) {
   return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(name);
 }
-function hasOpenAI() { return Boolean(cleanEnv(OPENAI_API_KEY)); }
-function getOpenAIClient() { return new OpenAI({ apiKey: OPENAI_API_KEY }); }
+function hasOpenAI() {
+  return Boolean(cleanEnv(OPENAI_API_KEY));
+}
+function getOpenAIClient() {
+  return new OpenAI({ apiKey: OPENAI_API_KEY });
+}
 
 function hasWebSearch() {
   if (WEB_SEARCH_PROVIDER === "serpapi") return Boolean(cleanEnv(SERPAPI_KEY));
@@ -213,8 +243,12 @@ function scheduleHistorySave() {
     writeJSON(HISTORY_FILE, historyByProject);
   }, 400);
 }
-function saveProjectsNow() { writeJSON(PROJECTS_FILE, projects); }
-function saveMemoryNow() { writeJSON(MEMORY_FILE, globalMemory); }
+function saveProjectsNow() {
+  writeJSON(PROJECTS_FILE, projects);
+}
+function saveMemoryNow() {
+  writeJSON(MEMORY_FILE, globalMemory);
+}
 
 function getHistory(project) {
   const p = safeProjectKey(project);
@@ -263,7 +297,9 @@ app.get("/health", (req, res) => {
   });
 });
 
+// ✅ compat: certains clients attendent un tableau JSON direct
 app.get("/projects", (req, res) => res.json(listProjects()));
+// ✅ format “propre” si tu veux l’utiliser côté front moderne
 app.get("/projects/v2", (req, res) => res.json({ ok: true, projects: listProjects() }));
 
 app.get("/logs", (req, res) => {
@@ -335,7 +371,7 @@ const memUpload = multer({
 app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
   let tmpPath = null;
 
-  // ✅ IMPORTANT: ce log DOIT être en guillemets normaux "..." (pas de \" ni de “ ”)
+  // ✅ IMPORTANT: guillemets normaux "..." (pas de \" ni de “ ”)
   try {
     logLine("[transcribe]", {
       size: req.file?.size,
@@ -355,7 +391,10 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
     else if (mime.includes("mp4") || mime.includes("m4a")) ext = "m4a";
     else if (mime.includes("ogg")) ext = "ogg";
 
-    tmpPath = path.join("/tmp", `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`);
+    tmpPath = path.join(
+      "/tmp",
+      `sensi_voice_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`
+    );
     await fs.promises.writeFile(tmpPath, req.file.buffer);
 
     const openai = getOpenAIClient();
@@ -367,7 +406,8 @@ app.post("/transcribe", memUpload.single("audio"), async (req, res) => {
       language: "fr",
     });
 
-    const text = (result && typeof result === "object" && "text" in result) ? result.text : String(result || "");
+    const text =
+      result && typeof result === "object" && "text" in result ? result.text : String(result || "");
     return res.json({ ok: true, text: cleanStr(text) });
   } catch (e) {
     console.error("TRANSCRIBE_ERROR:", e);
@@ -419,6 +459,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     });
 
     io.to(project).emit("chatMessage", msg);
+
+    // Note: tu peux remettre ici ton flow d'analyse Sensi si tu veux
     res.json({ ok: true, project, attachment });
   } catch (e) {
     logLine("[upload]", e?.message || e, e?.stack);
@@ -426,6 +468,9 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
+// ==================================================
+// EMIT HELPERS
+// ==================================================
 function emitSystem(project, text) {
   io.to(project).emit("systemMessage", { id: Date.now(), ts: Date.now(), project, text });
 }
@@ -460,6 +505,7 @@ io.on("connection", (socket) => {
 
   socket.on("getProjects", () => socket.emit("projectsUpdate", { projects: listProjects() }));
 
+  // ✅ createProject({name}) + createProject("name") + alias "create project"
   const handleCreateProject = (payload, ack) => {
     const { name } = normalizeCreatePayload(payload);
     const n = cleanStr(name);
@@ -493,7 +539,8 @@ io.on("connection", (socket) => {
     const p = safeProjectKey(project);
     if (!p) return;
     if (!projects.includes(p)) return socket.emit("projectError", { message: "Projet introuvable." });
-    if (projects.length <= 1) return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
+    if (projects.length <= 1)
+      return socket.emit("projectError", { message: "Impossible de supprimer le dernier projet." });
 
     io.to(p).emit("projectDeleted", { project: p });
 
