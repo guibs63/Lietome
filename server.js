@@ -1,5 +1,5 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4.3 — corrigé Railway ✅
-// Fix principal: supprimer tout \" et tout caractère parasite (ex: "<" avant app.get) sinon Node crash au parse.
+// guibs:/server.js (COMPLET) — ULTRA v3.4.4 — Railway OK ✅
+// Fix: supprimer tout \" et tout caractère parasite (ex: "<" avant app.get) sinon Node crash au parse.
 "use strict";
 
 const express = require("express");
@@ -16,7 +16,7 @@ const OpenAI = require("openai");
  * OPTIONAL DEPENDENCIES (NEVER CRASH ON REQUIRE)
  * ⚠️ Railway crash fix:
  * - Certaines libs (ex: pdf-parse >=2.x) peuvent throw au require() (DOMMatrix not defined).
- * - Ici, on considère ces deps comme "optionnelles": on NE DOIT JAMAIS planter au démarrage.
+ * - Ici, deps optionnelles: on NE DOIT JAMAIS planter au démarrage.
  */
 function optionalRequire(name) {
   try {
@@ -58,7 +58,7 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
 
-// ✅ anti-cache Railway (CORRIGÉ: pas de "<" ici)
+// ✅ anti-cache Railway (IMPORTANT: pas de "<" ici)
 app.get("/", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();
@@ -81,7 +81,7 @@ function cleanEnv(v) {
   return String(v ?? "").trim();
 }
 
-const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.3";
+const APP_VERSION = process.env.APP_VERSION || "ultra-v3.4.4";
 const STORAGE_DIR = path.join(__dirname, "storage");
 const HISTORY_FILE = path.join(STORAGE_DIR, "messages.json");
 const PROJECTS_FILE = path.join(STORAGE_DIR, "projects.json");
@@ -360,7 +360,7 @@ const upload = multer({
 });
 
 // =======================
-// Speech-to-text (Firefox fallback)
+// Speech-to-text (Whisper via OpenAI)
 // POST /transcribe  (multipart/form-data: audio=<file>)
 // =======================
 const memUpload = multer({
@@ -460,7 +460,6 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     io.to(project).emit("chatMessage", msg);
 
-    // Note: tu peux remettre ici ton flow d'analyse Sensi si tu veux
     res.json({ ok: true, project, attachment });
   } catch (e) {
     logLine("[upload]", e?.message || e, e?.stack);
@@ -483,7 +482,10 @@ const presence = new Map(); // project -> Map(socketId -> {username,userId})
 function getUsers(project) {
   const map = presence.get(project);
   if (!map) return [];
-  return Array.from(map.values()).map((v) => v.username).filter(Boolean);
+  // ✅ retourne une liste d'objets (meilleur côté client)
+  return Array.from(map.values())
+    .map((v) => ({ username: cleanStr(v.username), userId: cleanStr(v.userId) }))
+    .filter((v) => v.username);
 }
 function emitPresence(project) {
   io.to(project).emit("presenceUpdate", { project, users: getUsers(project) });
@@ -495,6 +497,31 @@ function broadcastProjects() {
 function normalizeCreatePayload(payload) {
   if (typeof payload === "string") return { name: payload };
   return payload || {};
+}
+
+// ==================================================
+// DELETE OWN MESSAGE (server-side)
+// ==================================================
+function deleteMessageIfOwner(project, messageId, requesterUserId) {
+  const p = safeProjectKey(project);
+  const mid = Number(messageId);
+  const uid = cleanStr(requesterUserId);
+
+  if (!p || !Number.isFinite(mid) || !uid) return { ok: false, reason: "bad_args" };
+
+  const arr = historyByProject[p];
+  if (!Array.isArray(arr) || arr.length === 0) return { ok: false, reason: "not_found" };
+
+  const idx = arr.findIndex((m) => Number(m?.id) === mid);
+  if (idx < 0) return { ok: false, reason: "not_found" };
+
+  const msg = arr[idx];
+  if (cleanStr(msg?.userId) !== uid) return { ok: false, reason: "not_owner" };
+
+  arr.splice(idx, 1);
+  historyByProject[p] = arr;
+  scheduleHistorySave();
+  return { ok: true };
 }
 
 io.on("connection", (socket) => {
@@ -594,6 +621,29 @@ io.on("connection", (socket) => {
     const msg = { id: Date.now(), ts: Date.now(), project: p, username: u, userId: uid, message: m };
     pushMessage(p, { id: msg.id, ts: msg.ts, username: msg.username, userId: msg.userId, message: msg.message });
     io.to(p).emit("chatMessage", msg);
+  });
+
+  // ✅ DELETE OWN MESSAGE
+  socket.on("deleteMessage", ({ project, messageId }, ack) => {
+    const p = safeProjectKey(project);
+    const mid = Number(messageId);
+    const uid = cleanStr(socket.data.userId);
+
+    if (!p || !projects.includes(p) || !uid || !Number.isFinite(mid)) {
+      const err = { ok: false, error: "bad_request" };
+      if (typeof ack === "function") ack(err);
+      return;
+    }
+
+    const result = deleteMessageIfOwner(p, mid, uid);
+    if (!result.ok) {
+      const err = { ok: false, error: result.reason || "delete_failed" };
+      if (typeof ack === "function") ack(err);
+      return;
+    }
+
+    io.to(p).emit("messageDeleted", { project: p, messageId: mid });
+    if (typeof ack === "function") ack({ ok: true });
   });
 
   socket.on("disconnect", () => {

@@ -1,15 +1,15 @@
-
-
-
-
-
-<!-- guibs:/index.html (COMPLET) — ULTRA v3.4.3 aligned (voice + FFT + projects compat) -->
+<!-- guibs:/index.html (COMPLET) — ULTRA v3.4.5 aligned (Railway + socket fallback + health) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sensi-IA_travail_collaboratif</title>
+
+  <!-- Avoid aggressive caching on some browsers/proxies -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
 
   <style>
     body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
@@ -37,6 +37,8 @@
     .danger{ border:1px solid #f2b8b5; background:#fff5f5; }
     #statusbar{ margin:8px 0 12px; padding:8px 10px; border:1px dashed rgba(0,0,0,.18); border-radius:10px; background:#fff; font-size:12px; color:#444; }
     #statusbar code{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .warn{ color:#8a1f11; }
+    .ok{ color:#126a2b; }
   </style>
 </head>
 
@@ -72,7 +74,7 @@
 
       <form id="chat-form" autocomplete="off">
         <input type="text" id="message" placeholder="Message..." autocomplete="off" />
-        <input type="file" id="file" accept=".pdf,.txt,.docx,.xlsx,image/*,audio/*" />
+        <input type="file" id="file" accept="image/*,audio/*,.pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.json" />
         <button type="submit">Envoyer</button>
         <span class="upload-state" id="upload-state"></span>
       </form>
@@ -87,18 +89,53 @@
     </aside>
   </div>
 
-  <script src="/socket.io/socket.io.js"></script>
+  <!-- =========================
+       Socket.IO loader with fallback
+       ========================= -->
+  <script>
+    (function loadSocketIO() {
+      function inject(src, onload) {
+        const s = document.createElement("script");
+        s.src = src;
+        s.async = true;
+        s.onload = onload;
+        s.onerror = () => onload(new Error("load_failed"));
+        document.head.appendChild(s);
+      }
+
+      // Try local first
+      inject("/socket.io/socket.io.js", (err) => {
+        if (!err && window.io) return;
+
+        // Fallback CDN (compatible with Socket.IO v4)
+        inject("https://cdn.socket.io/4.7.5/socket.io.min.js", (err2) => {
+          if (!err2 && window.io) return;
+
+          const st = document.getElementById("status-text");
+          st.innerHTML = `<span class="warn">Erreur: Socket.IO indisponible (script non chargé).</span>`;
+        });
+      });
+    })();
+  </script>
+
+  <!-- Your client code (depends on window.io) -->
   <script src="/client.js"></script>
 
   <script>
     (async () => {
       const el = document.getElementById("status-text");
+
       try {
         const res = await fetch("/health", { cache: "no-store" });
         const data = await res.json();
-        el.innerHTML = `OK ✅ | <code>${data.version || "?"}</code> | AI: <code>${data.ai || "?"}</code> | Web: <code>${data.web || ""}</code>`;
+
+        const v = data.version || "?";
+        const ai = data.ai || "?";
+        const web = data.web || "";
+
+        el.innerHTML = `<span class="ok">OK ✅</span> | <code>${v}</code> | AI: <code>${ai}</code> | Web: <code>${web}</code>`;
       } catch {
-        el.textContent = "offline / health unreachable";
+        el.innerHTML = `<span class="warn">offline / health unreachable</span>`;
       }
     })();
   </script>

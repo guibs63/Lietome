@@ -1,75 +1,31 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.4.3 CLIENT (Railway compatible) ✅
+// guibs:/client.js (COMPLET) — ULTRA v3.4.5 CLIENT (Railway + socket fallback safe) ✅
 // VOICE fix: "over / au revoir" = triggers d’envoi, mais JAMAIS ajoutés au texte final.
 "use strict";
 
-// ======================================================
-// SOCKET
-// ======================================================
-const socket = io(window.location.origin, {
-  transports: ["websocket", "polling"],
-  reconnection: true,
-  reconnectionAttempts: 10,
-  reconnectionDelay: 600,
-  timeout: 20000,
-});
-window.socket = socket;
+/* ======================================================
+   SAFE SOCKET.IO INIT (wait for window.io)
+   ====================================================== */
 
-const AUTO_JOIN = false;
+const IO_WAIT_MS = 7000;
+const IO_POLL_MS = 60;
 
-// VOICE / AUDIO
-const ENABLE_VOICE = true;
-const VOICE_APPEND_TO_INPUT = true;
-const VOICE_SEND_ON_OVER = true;
-const VOICE_OVER_WORD = "over";
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-/**
- * ✅ Triggers:
- * - "over" (cible)
- * - Firefox/fr-FR peut transcrire "over" en "ouvre"/"terminé"
- * - et parfois "au revoir" (ou "au-revoir" / "aurevoir")
- */
-const VOICE_TRIGGERS = [
-  "over",
-  "ouvre",
-  "terminé",
-  "termine",
-  "terminée",
-  "terminee",
-  "terminer",
-  "au revoir",
-  "au-revoir",
-  "aurevoir",
-];
+async function waitForIo() {
+  const start = Date.now();
+  while (Date.now() - start < IO_WAIT_MS) {
+    if (typeof window.io === "function") return window.io;
+    await sleep(IO_POLL_MS);
+  }
+  return null;
+}
 
-// Firefox: éviter blocage autoplay / permissions
-const FIREFOX_FORCE_USER_GESTURE_BEFORE_AUDIOCTX = true;
+function cleanStr(v) { return String(v ?? "").trim(); }
 
-// FFT
-const SHOW_FFT = true;
-const FFT_FPS = 30;
-const FFT_BINS = 64;
-const FFT_SMOOTHING = 0.8;
-const FFT_FFTSIZE = 2048;
-const FFT_MIN_DB = -90;
-const FFT_MAX_DB = -10;
+/* ======================================================
+   DOM
+   ====================================================== */
 
-// Upload
-const UPLOAD_ENDPOINT = "/upload";
-const AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";
-const AUDIO_MAX_SECONDS = 120;
-
-let currentProject = null;
-let currentUsername = null;
-
-const seenMessageIds = new Set();
-const messageNodes = new Map();
-
-const LS_USER_ID = "sensi_user_id";
-const LS_LAST_USERNAME = "sensi_last_username";
-const LS_LAST_PROJECT = "sensi_last_project";
-const myUserId = getOrCreateUserId();
-
-// DOM
 const chat = document.getElementById("chat");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
@@ -87,7 +43,10 @@ const deleteProjectBtn = document.getElementById("delete-project-btn");
 const usersList = document.getElementById("users");
 const usersCount = document.getElementById("users-count");
 const currentProjectLabel = document.getElementById("current-project-label");
+
+// index.html utilise #status-text pour /health. On évite d’écraser : on ajoute un sous-status socket.
 const statusText = document.getElementById("status-text");
+let socketStatusSpan = null;
 
 (function assertDom() {
   const required = [
@@ -106,60 +65,56 @@ const statusText = document.getElementById("status-text");
   }
 })();
 
-function setStatusBar(txt) {
-  if (!statusText) return;
-  statusText.textContent = String(txt || "");
+function ensureSocketStatusSlot() {
+  if (!statusText) return null;
+  if (socketStatusSpan) return socketStatusSpan;
+
+  // Si l’index a déjà mis du HTML (OK | version | AI...), on ajoute à la fin.
+  socketStatusSpan = document.createElement("span");
+  socketStatusSpan.id = "socket-status";
+  socketStatusSpan.style.marginLeft = "10px";
+  socketStatusSpan.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  socketStatusSpan.style.fontSize = "12px";
+  socketStatusSpan.textContent = "socket: …";
+  statusText.appendChild(socketStatusSpan);
+  return socketStatusSpan;
 }
 
-// socket status
-setStatusBar("socket: connecting…");
-socket.on("connect", () => setStatusBar(`socket: connected (${socket.id})`));
-socket.on("disconnect", () => setStatusBar("socket: disconnected"));
-socket.on("connect_error", (err) => setStatusBar(`socket: error (${err?.message || "?"})`));
-
-// utils
-function cleanStr(v) { return String(v ?? "").trim(); }
-
-function requireReadyForVoice() {
-  if (!cleanStr(usernameInput?.value)) {
-    alert("Entre un pseudo puis clique Rejoindre avant d'activer la voix 🙂");
-    return false;
-  }
-  if (!cleanStr(currentProject)) {
-    alert("Rejoins un projet avant d'activer la reconnaissance vocale 🙂");
-    return false;
-  }
-  return true;
+function setSocketStatus(txt) {
+  const slot = ensureSocketStatusSlot();
+  if (!slot) return;
+  slot.textContent = `socket: ${String(txt || "")}`;
 }
 
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+/* ======================================================
+   LOCAL STORAGE / IDs
+   ====================================================== */
 
-function formatTime(ts) {
-  try {
-    if (!ts) return "";
-    const d = new Date(ts);
-    return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  } catch { return ""; }
-}
+const AUTO_JOIN = false;
+
+const LS_USER_ID = "sensi_user_id";
+const LS_LAST_USERNAME = "sensi_last_username";
+const LS_LAST_PROJECT = "sensi_last_project";
 
 function getOrCreateUserId() {
   try {
     const existing = localStorage.getItem(LS_USER_ID);
     if (existing && existing.length >= 8) return existing;
-    const uid = (crypto?.randomUUID ? crypto.randomUUID() : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+    const uid =
+      (crypto?.randomUUID
+        ? crypto.randomUUID()
+        : `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`);
     localStorage.setItem(LS_USER_ID, uid);
     return uid;
   } catch {
     return `uid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   }
 }
+
+const myUserId = getOrCreateUserId();
+
+let currentProject = null;
+let currentUsername = null;
 
 function saveLastSession() {
   try {
@@ -179,12 +134,32 @@ function restoreLastSession() {
   }
 }
 
+/* ======================================================
+   UI helpers
+   ====================================================== */
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatTime(ts) {
+  try {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  } catch { return ""; }
+}
+
 function setProjectLabel(p) {
   if (!currentProjectLabel) return;
   currentProjectLabel.textContent = p || "—";
 }
 
-// UI
 function clearChat() {
   chat.innerHTML = "";
   seenMessageIds.clear();
@@ -199,7 +174,13 @@ function addSystem(text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-// messages
+/* ======================================================
+   Messages rendering + delete support
+   ====================================================== */
+
+const seenMessageIds = new Set();
+const messageNodes = new Map();
+
 function renderAttachment(att) {
   if (!att?.url) return "";
   const name = escapeHtml(att.filename || "fichier");
@@ -241,21 +222,69 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
   row.className = "msg msg-row";
   if (Number.isFinite(mid)) row.dataset.mid = String(mid);
 
+  // Bouton delete uniquement pour MES messages
+  const canDelete = cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId);
+
   row.innerHTML = `
-    <div class="msg-main">
-      <span class="time">${time ? `[${time}]` : ""}</span>
-      <strong>${escapeHtml(username)}:</strong>
-      <span class="text">${escapeHtml(message)}</span>
-      ${attachment ? renderAttachment(attachment) : ""}
+    <div class="msg-main" style="display:flex; gap:10px; align-items:flex-start;">
+      <div style="flex:1;">
+        <span class="time">${time ? `[${time}]` : ""}</span>
+        <strong>${escapeHtml(username)}:</strong>
+        <span class="text">${escapeHtml(message)}</span>
+        ${attachment ? renderAttachment(attachment) : ""}
+      </div>
+      ${canDelete && Number.isFinite(mid) ? `
+        <button type="button"
+          data-del="1"
+          data-mid="${String(mid)}"
+          title="Supprimer mon message"
+          style="border:1px solid #f2b8b5;background:#fff5f5;border-radius:10px;padding:4px 8px;cursor:pointer;">
+          🗑️
+        </button>
+      ` : ""}
     </div>
   `;
 
   chat.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
+
   if (Number.isFinite(mid)) messageNodes.set(mid, row);
 }
 
-// projects list
+function removeMessageNode(messageId) {
+  const mid = Number(messageId);
+  const node = messageNodes.get(mid);
+  if (node && node.parentNode) node.parentNode.removeChild(node);
+  messageNodes.delete(mid);
+  seenMessageIds.delete(mid);
+}
+
+// delegate delete clicks
+chat.addEventListener("click", (e) => {
+  const btn = e.target?.closest?.("button[data-del='1']");
+  if (!btn) return;
+  const mid = Number(btn.getAttribute("data-mid"));
+  if (!Number.isFinite(mid)) return;
+  if (!currentProject) return;
+
+  const ok = confirm("Supprimer ce message ?");
+  if (!ok) return;
+
+  if (!socket) return alert("Socket non prêt.");
+  socket.emit("deleteMessage", { project: currentProject, messageId: mid }, (resp) => {
+    if (!resp?.ok) {
+      alert("Suppression impossible: " + (resp?.error || "unknown"));
+      return;
+    }
+    // le serveur broadcast aussi messageDeleted, mais on peut retirer tout de suite
+    removeMessageNode(mid);
+  });
+});
+
+/* ======================================================
+   Projects list
+   ====================================================== */
+
 function setProjectsOptions(projects, keepSelection = true) {
   const prev = keepSelection ? cleanStr(projectSelect.value) : "";
   projectSelect.innerHTML = "";
@@ -279,77 +308,36 @@ function setProjectsOptions(projects, keepSelection = true) {
   }
 }
 
-// join
-function joinProject() {
-  const username = cleanStr(usernameInput.value);
-  const project = cleanStr(projectSelect.value);
+/* ======================================================
+   Presence rendering
+   ====================================================== */
 
-  if (!username) return alert("Entre un pseudo 🙂");
-  if (!project) return alert("Aucun projet disponible.");
+function renderPresence(users) {
+  if (!usersList || !usersCount) return;
 
-  currentUsername = username;
-  currentProject = project;
-  saveLastSession();
+  const arr = Array.isArray(users) ? users : [];
+  usersCount.textContent = String(arr.length);
 
-  setProjectLabel(currentProject);
-  clearChat();
-  addSystem(`Connexion au projet "${currentProject}"...`);
+  usersList.innerHTML = "";
+  for (const u of arr) {
+    const li = document.createElement("li");
+    const name = cleanStr(u?.username) || "—";
+    const uid = cleanStr(u?.userId);
 
-  socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
-
-  updateVoiceUiGate();
+    li.innerHTML = `
+      <span>${escapeHtml(name)}</span>
+      <span style="opacity:.55;font-size:11px;">${uid ? escapeHtml(uid.slice(0, 6)) : ""}</span>
+    `;
+    usersList.appendChild(li);
+  }
 }
 
-joinBtn.addEventListener("click", joinProject);
-usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
-usernameInput.addEventListener("input", () => updateVoiceUiGate());
+/* ======================================================
+   Upload / send message
+   ====================================================== */
 
-// create/delete project
-if (createProjectBtn && newProjectInput) {
-  const requestCreateProject = (nameRaw) => {
-    const name = cleanStr(nameRaw);
-    if (!name) return;
+const UPLOAD_ENDPOINT = "/upload";
 
-    socket.emit("createProject", { name }, (resp) => {
-      if (!resp || resp.ok !== true) {
-        alert(resp?.message || "Erreur création projet");
-        return;
-      }
-
-      const list = Array.isArray(resp.projects) ? resp.projects : [];
-      if (list.length > 0) setProjectsOptions(list, false);
-      if (resp.project) projectSelect.value = resp.project;
-
-      addSystem(`✅ Projet créé: "${resp.project}"`);
-    });
-  };
-
-  createProjectBtn.addEventListener("click", () => {
-    requestCreateProject(newProjectInput.value);
-    newProjectInput.value = "";
-    newProjectInput.focus();
-  });
-
-  newProjectInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      requestCreateProject(newProjectInput.value);
-      newProjectInput.value = "";
-    }
-  });
-}
-
-if (deleteProjectBtn) {
-  deleteProjectBtn.addEventListener("click", () => {
-    const p = cleanStr(projectSelect.value);
-    if (!p) return;
-    const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
-    if (!ok) return;
-    socket.emit("deleteProject", { project: p });
-  });
-}
-
-// upload
 async function uploadFile(file) {
   if (!currentProject) throw new Error("Aucun projet rejoint.");
   const username = currentUsername || cleanStr(usernameInput.value) || "Anonyme";
@@ -360,13 +348,12 @@ async function uploadFile(file) {
   fd.append("username", username);
   fd.append("userId", myUserId);
 
-  const res = await fetch(UPLOAD_ENDPOINT, { method: "POST", body: fd });
+  const res = await fetch(UPLOAD_ENDPOINT, { method: "POST", body: fd, cache: "no-store" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || `Upload failed (${res.status})`);
   return data;
 }
 
-// send text
 function sendTextMessage(text) {
   if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
   const username = cleanStr(usernameInput.value);
@@ -381,14 +368,85 @@ function sendTextMessage(text) {
   socket.emit("chatMessage", { username, userId: myUserId, message, project: currentProject });
 }
 
-// =======================
-// SPEECH-TO-TEXT fallback (Firefox)
-// =======================
+/* ======================================================
+   VOICE / AUDIO / FFT (your logic preserved, minor safety)
+   ====================================================== */
+
+const ENABLE_VOICE = true;
+const VOICE_APPEND_TO_INPUT = true;
+const VOICE_SEND_ON_OVER = true;
+const VOICE_OVER_WORD = "over";
+
+const VOICE_TRIGGERS = [
+  "over",
+  "ouvre",
+  "terminé",
+  "termine",
+  "terminée",
+  "terminee",
+  "terminer",
+  "au revoir",
+  "au-revoir",
+  "aurevoir",
+];
+
+const FIREFOX_FORCE_USER_GESTURE_BEFORE_AUDIOCTX = true;
+
+// FFT
+const SHOW_FFT = true;
+const FFT_FPS = 30;
+const FFT_BINS = 64;
+const FFT_SMOOTHING = 0.8;
+const FFT_FFTSIZE = 2048;
+const FFT_MIN_DB = -90;
+const FFT_MAX_DB = -10;
+
+// Audio record
+const AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";
+const AUDIO_MAX_SECONDS = 120;
+
+function requireReadyForVoice() {
+  if (!cleanStr(usernameInput?.value)) {
+    alert("Entre un pseudo puis clique Rejoindre avant d'activer la voix 🙂");
+    return false;
+  }
+  if (!cleanStr(currentProject)) {
+    alert("Rejoins un projet avant d'activer la reconnaissance vocale 🙂");
+    return false;
+  }
+  return true;
+}
+
+function buildTriggerEndRegex() {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = VOICE_TRIGGERS
+    .map((t) => cleanStr(t))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map(esc);
+
+  return new RegExp(`(?:${parts.join("|")})\\s*[\\.!\\?,;:\\u2026]*\\s*$`, "i");
+}
+const TRIGGER_END_RE = buildTriggerEndRegex();
+
+function hasVoiceTriggerAtEnd(text) {
+  const t = cleanStr(text);
+  if (!t) return false;
+  return TRIGGER_END_RE.test(t);
+}
+function stripVoiceTriggerAtEnd(text) {
+  const t = cleanStr(text);
+  if (!t) return "";
+  return cleanStr(t.replace(TRIGGER_END_RE, ""));
+}
+
 function guessExtFromMime(mime) {
   const m = String(mime || "");
   if (m.includes("ogg")) return "ogg";
   if (m.includes("mp4")) return "mp4";
   if (m.includes("webm")) return "webm";
+  if (m.includes("wav")) return "wav";
+  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
   return "";
 }
 
@@ -397,181 +455,25 @@ async function transcribeAudioBlob(blob) {
   const ext = guessExtFromMime(blob.type) || "webm";
   fd.append("audio", new File([blob], `voice_${Date.now()}.${ext}`, { type: blob.type || "audio/webm" }));
 
-  const res = await fetch("/transcribe", { method: "POST", body: fd });
+  const res = await fetch("/transcribe", { method: "POST", body: fd, cache: "no-store" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data?.ok) throw new Error(data?.error || `Transcription failed (${res.status})`);
   return cleanStr(data.text || "");
 }
 
-/**
- * ✅ Trigger handling (END-ONLY):
- * - On déclenche seulement si le trigger est en fin (avec ponctuation possible).
- * - On retire le trigger et la ponctuation qui suit, sans toucher au reste.
- */
-function buildTriggerEndRegex() {
-  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const parts = VOICE_TRIGGERS
-    .map((t) => cleanStr(t))
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length) // multi-mots d'abord ("au revoir")
-    .map(esc);
-
-  // ex: /(au\s+revoir|over|ouvre|termin[eé]...)\s*[.!?,;:…]*\s*$/i
-  return new RegExp(`(?:${parts.join("|")})\\s*[\\.!\\?,;:\\u2026]*\\s*$`, "i");
-}
-
-const TRIGGER_END_RE = buildTriggerEndRegex();
-
-function hasVoiceTriggerAtEnd(text) {
-  const t = cleanStr(text);
-  if (!t) return false;
-  return TRIGGER_END_RE.test(t);
-}
-
-function stripVoiceTriggerAtEnd(text) {
-  const t = cleanStr(text);
-  if (!t) return "";
-  return cleanStr(t.replace(TRIGGER_END_RE, ""));
-}
-
-// form submit
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-
-  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
-  const username = cleanStr(usernameInput.value);
-  if (!username) return alert("Entre un pseudo 🙂");
-
-  const message = cleanStr(input.value);
-  const file = fileInput?.files?.[0];
-  const submitBtn = form.querySelector("button[type=submit]");
-
+function isSupportedMime(mime) {
   try {
-    if (file) {
-      if (uploadState) uploadState.textContent = `Upload "${file.name}"...`;
-      if (submitBtn) submitBtn.disabled = true;
-
-      await uploadFile(file);
-
-      if (uploadState) uploadState.textContent = "Upload OK ✅";
-      if (fileInput) fileInput.value = "";
-      input.value = "";
-      input.focus();
-      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2000);
-      return;
-    }
-
-    if (!message) return;
-
-    sendTextMessage(message);
-    input.value = "";
-    input.focus();
-  } catch (err) {
-    console.error(err);
-    alert(`Erreur: ${err?.message || err}`);
-    if (uploadState) uploadState.textContent = "";
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
-  }
-});
-
-// receive
-socket.on("chatHistory", (payload) => {
-  const p = cleanStr(payload?.project);
-  const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
-  if (!currentProject || p !== currentProject) return;
-
-  clearChat();
-  if (msgs.length === 0) return addSystem(`Historique vide pour "${currentProject}".`);
-  addSystem(`Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
-
-  for (const m of msgs) addMessage(m);
-});
-
-socket.on("chatMessage", (data) => {
-  if (!currentProject) return;
-  const p = cleanStr(data?.project);
-  if (p && p !== currentProject) return;
-  addMessage(data);
-});
-
-socket.on("systemMessage", (msg) => {
-  if (!currentProject) return;
-  const p = cleanStr(msg?.project);
-  if (p && p !== currentProject) return;
-  addSystem(msg?.text || "Message système");
-});
-
-socket.on("presenceUpdate", (payload) => {
-  // optionnel: tu peux remplir usersList/usersCount ici
-});
-
-socket.on("projectsUpdate", (payload) => {
-  const list = Array.isArray(payload?.projects) ? payload.projects : [];
-  setProjectsOptions(list, true);
-
-  const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
-  if (want && list.includes(want)) projectSelect.value = want;
-
-  if (currentProject && !list.includes(currentProject)) {
-    currentProject = null;
-    setProjectLabel("—");
-    clearChat();
-    addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
-  }
-
-  updateVoiceUiGate();
-});
-
-socket.on("projectDeleted", ({ project }) => {
-  const p = cleanStr(project);
-  if (currentProject && p === currentProject) {
-    currentProject = null;
-    setProjectLabel("—");
-    clearChat();
-    addSystem(`Le projet "${p}" a été supprimé.`);
-  }
-});
-
-socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
-
-// bootstrap projects
-const last = restoreLastSession();
-let projectsLoadedOnce = false;
-
-async function loadProjectsOnce() {
-  if (projectsLoadedOnce) return;
-  projectsLoadedOnce = true;
-
-  try {
-    const res = await fetch("/projects", { cache: "no-store" });
-    const data = await res.json().catch(() => ({}));
-
-    const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : [];
-    if (list.length > 0) {
-      setProjectsOptions(list, true);
-      const want = cleanStr(last?.p);
-      if (want && list.includes(want)) projectSelect.value = want;
-      updateVoiceUiGate();
-      return;
-    }
-  } catch (_) {}
-
-  socket.emit("getProjects");
+    return !!(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mime));
+  } catch { return false; }
+}
+function pickAudioMime() {
+  if (isSupportedMime(AUDIO_MIME_PREFERRED)) return AUDIO_MIME_PREFERRED;
+  const fallbacks = ["audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"];
+  for (const m of fallbacks) if (isSupportedMime(m)) return m;
+  return "";
 }
 
-socket.on("connect", async () => {
-  await loadProjectsOnce();
-  if (AUTO_JOIN) {
-    const u = cleanStr(usernameInput.value);
-    const p = cleanStr(projectSelect.value);
-    if (u && p && !currentProject) joinProject();
-  }
-});
-
-// =========================
-// VOICE + FFT
-// =========================
+// Voice state
 let recognition = null;
 let isListening = false;
 let voiceMode = null; // "speech" | "segment"
@@ -605,18 +507,6 @@ let voiceHint = null;
 let fftCanvas = null;
 let fftCtx = null;
 
-function isSupportedMime(mime) {
-  try {
-    return !!(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mime));
-  } catch { return false; }
-}
-function pickAudioMime() {
-  if (isSupportedMime(AUDIO_MIME_PREFERRED)) return AUDIO_MIME_PREFERRED;
-  const fallbacks = ["audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"];
-  for (const m of fallbacks) if (isSupportedMime(m)) return m;
-  return "";
-}
-
 function updateVoiceUiGate() {
   if (!btnVoice || !btnRec || !btnSendRec) return;
   const ok = Boolean(cleanStr(currentProject) && cleanStr(usernameInput?.value));
@@ -631,6 +521,7 @@ function ensureVoiceUI() {
 
   voiceBar = document.createElement("div");
   voiceBar.id = "voice-bar";
+  voiceBar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0;";
 
   btnVoice = document.createElement("button");
   btnVoice.type = "button";
@@ -652,6 +543,7 @@ function ensureVoiceUI() {
   fftCanvas = document.createElement("canvas");
   fftCanvas.width = 360;
   fftCanvas.height = 60;
+  fftCanvas.style.cssText = "border:1px solid #eee;border-radius:10px;";
   fftCtx = fftCanvas.getContext("2d");
 
   voiceBar.appendChild(btnVoice);
@@ -663,6 +555,7 @@ function ensureVoiceUI() {
   form.parentNode.insertBefore(voiceBar, form.nextSibling);
 
   updateVoiceUiGate();
+  setVoiceButtonState();
 
   btnVoice.addEventListener("click", async () => {
     if (!ENABLE_VOICE) return;
@@ -778,9 +671,6 @@ function startFft() {
   fftAnim = requestAnimationFrame(draw);
 }
 
-// ======================================================
-// LISTENING
-// ======================================================
 async function startListening() {
   if (!requireReadyForVoice()) return;
   ensureVoiceUI();
@@ -795,10 +685,9 @@ async function startListening() {
     return;
   }
 
-  // ✅ Chrome/Edge: Web Speech API
+  // Chrome/Edge SpeechRecognition
   if (("webkitSpeechRecognition" in window) || ("SpeechRecognition" in window)) {
     voiceMode = "speech";
-
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SR();
     recognition.continuous = true;
@@ -829,18 +718,15 @@ async function startListening() {
       const combinedRaw = cleanStr(final || interim);
       if (!combinedRaw) return;
 
-      // ✅ Preview sans trigger en fin (si présent)
       const combinedPreview = stripVoiceTriggerAtEnd(combinedRaw);
       if (voiceHint) voiceHint.textContent = `🗣️ ${combinedPreview.slice(0, 80)}${combinedPreview.length > 80 ? "…" : ""}`;
 
-      // ✅ Append to input: JAMAIS de trigger ajouté
       if (VOICE_APPEND_TO_INPUT) {
         const cur = cleanStr(input.value);
         const add = stripVoiceTriggerAtEnd(combinedRaw);
         if (add) input.value = cur ? `${cur} ${add}` : add;
       }
 
-      // ✅ Envoi si trigger en fin (et envoi sans trigger)
       if (VOICE_SEND_ON_OVER && hasVoiceTriggerAtEnd(combinedRaw)) {
         const msg = cleanStr(stripVoiceTriggerAtEnd(combinedRaw) || stripVoiceTriggerAtEnd(input.value));
         if (msg) {
@@ -859,7 +745,7 @@ async function startListening() {
     return;
   }
 
-  // ✅ Firefox: dictée via segments STOP/START => blob valide => /transcribe
+  // Firefox segment mode -> /transcribe
   voiceMode = "segment";
   segAccumulatedText = "";
   if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, puis dis "${VOICE_OVER_WORD}" / "ouvre" / "terminé" / "au revoir" pour envoyer.`;
@@ -892,13 +778,13 @@ async function startListening() {
         segQueue = segQueue.then(async () => {
           if (segInFlight) return;
           segInFlight = true;
+
           try {
             if (!blob || blob.size < 10 * 1024) return;
 
             const text = await transcribeAudioBlob(blob);
             if (!text) return;
 
-            // on accumule brut, puis on affiche/nettoie pour l'UI
             segAccumulatedText = cleanStr((segAccumulatedText + " " + text).slice(-2500));
 
             const preview = stripVoiceTriggerAtEnd(segAccumulatedText);
@@ -907,12 +793,10 @@ async function startListening() {
               voiceHint.textContent = `🗣️ ${p}${preview.length > 90 ? "…" : ""}`;
             }
 
-            // ✅ Input = version nettoyée (jamais "over/au revoir")
             if (VOICE_APPEND_TO_INPUT) {
               if (preview) input.value = preview;
             }
 
-            // ✅ Envoi si trigger en fin de l'accumulation (et envoi nettoyé)
             if (VOICE_SEND_ON_OVER && hasVoiceTriggerAtEnd(segAccumulatedText)) {
               const msg = cleanStr(stripVoiceTriggerAtEnd(segAccumulatedText));
               if (msg) sendTextMessage(msg);
@@ -932,7 +816,7 @@ async function startListening() {
         });
       };
 
-      segRecorder.start(); // no timeslice => container finalized on stop
+      segRecorder.start();
       clearTimeout(segTimer);
       segTimer = setTimeout(() => {
         try { if (segRecorder && segRecorder.state === "recording") segRecorder.stop(); } catch {}
@@ -956,7 +840,6 @@ function stopListening() {
   try { recognition && recognition.stop(); } catch {}
   recognition = null;
 
-  // Firefox segment mode
   try { if (segTimer) clearTimeout(segTimer); } catch {}
   segTimer = null;
   try { if (segRecorder && segRecorder.state === "recording") segRecorder.stop(); } catch {}
@@ -969,9 +852,6 @@ function stopListening() {
   stopFft();
 }
 
-// ======================================================
-// RECORDING (upload audio as file)
-// ======================================================
 async function startRecording() {
   if (!requireReadyForVoice()) return;
   ensureVoiceUI();
@@ -1027,17 +907,296 @@ function stopRecording() {
   try { if (recorder && recorder.state === "recording") recorder.stop(); } catch {}
 }
 
-// init voice bar
+/* ======================================================
+   FORM submit (text or file)
+   ====================================================== */
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  if (!currentProject) return alert("Rejoins un projet d’abord 🙂");
+  const username = cleanStr(usernameInput.value);
+  if (!username) return alert("Entre un pseudo 🙂");
+
+  const message = cleanStr(input.value);
+  const file = fileInput?.files?.[0];
+  const submitBtn = form.querySelector("button[type=submit]");
+
+  try {
+    if (file) {
+      if (uploadState) uploadState.textContent = `Upload "${file.name}"...`;
+      if (submitBtn) submitBtn.disabled = true;
+
+      await uploadFile(file);
+
+      if (uploadState) uploadState.textContent = "Upload OK ✅";
+      if (fileInput) fileInput.value = "";
+      input.value = "";
+      input.focus();
+      setTimeout(() => { if (uploadState) uploadState.textContent = ""; }, 2000);
+      return;
+    }
+
+    if (!message) return;
+
+    sendTextMessage(message);
+    input.value = "";
+    input.focus();
+  } catch (err) {
+    console.error(err);
+    alert(`Erreur: ${err?.message || err}`);
+    if (uploadState) uploadState.textContent = "";
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+});
+
+/* ======================================================
+   JOIN / CREATE / DELETE project
+   ====================================================== */
+
+function joinProject() {
+  const username = cleanStr(usernameInput.value);
+  const project = cleanStr(projectSelect.value);
+
+  if (!username) return alert("Entre un pseudo 🙂");
+  if (!project) return alert("Aucun projet disponible.");
+
+  currentUsername = username;
+  currentProject = project;
+  saveLastSession();
+
+  setProjectLabel(currentProject);
+  clearChat();
+  addSystem(`Connexion au projet "${currentProject}"...`);
+
+  socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
+
+  updateVoiceUiGate();
+}
+
+joinBtn.addEventListener("click", joinProject);
+usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinProject(); });
+usernameInput.addEventListener("input", () => updateVoiceUiGate());
+
+function isValidProjectName(name) {
+  return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(cleanStr(name));
+}
+
+if (createProjectBtn && newProjectInput) {
+  const requestCreateProject = (nameRaw) => {
+    const name = cleanStr(nameRaw);
+    if (!name) return;
+    if (!isValidProjectName(name)) return alert("Nom invalide (2-50, lettres/chiffres/espaces/_-.)");
+
+    socket.emit("createProject", { name }, (resp) => {
+      if (!resp || resp.ok !== true) {
+        alert(resp?.message || "Erreur création projet");
+        return;
+      }
+
+      const list = Array.isArray(resp.projects) ? resp.projects : [];
+      if (list.length > 0) setProjectsOptions(list, false);
+      if (resp.project) projectSelect.value = resp.project;
+
+      addSystem(`✅ Projet créé: "${resp.project}"`);
+    });
+  };
+
+  createProjectBtn.addEventListener("click", () => {
+    requestCreateProject(newProjectInput.value);
+    newProjectInput.value = "";
+    newProjectInput.focus();
+  });
+
+  newProjectInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      requestCreateProject(newProjectInput.value);
+      newProjectInput.value = "";
+    }
+  });
+}
+
+if (deleteProjectBtn) {
+  deleteProjectBtn.addEventListener("click", () => {
+    const p = cleanStr(projectSelect.value);
+    if (!p) return;
+    const ok = confirm(`Supprimer le projet "${p}" ?\n\n⚠️ Cela supprime aussi son historique de messages.`);
+    if (!ok) return;
+    socket.emit("deleteProject", { project: p });
+  });
+}
+
+/* ======================================================
+   BOOTSTRAP projects
+   ====================================================== */
+
+const last = restoreLastSession();
+let projectsLoadedOnce = false;
+
+async function loadProjectsOnce() {
+  if (projectsLoadedOnce) return;
+  projectsLoadedOnce = true;
+
+  try {
+    const res = await fetch("/projects", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+
+    const list = Array.isArray(data) ? data : Array.isArray(data?.projects) ? data.projects : [];
+    if (list.length > 0) {
+      setProjectsOptions(list, true);
+      const want = cleanStr(last?.p);
+      if (want && list.includes(want)) projectSelect.value = want;
+      updateVoiceUiGate();
+      return;
+    }
+  } catch (_) {}
+
+  socket.emit("getProjects");
+}
+
+/* ======================================================
+   SOCKET + EVENTS (initialized after io ready)
+   ====================================================== */
+
+let socket = null;
+
+async function initSocket() {
+  setSocketStatus("connecting…");
+
+  const ioFn = await waitForIo();
+  if (!ioFn) {
+    setSocketStatus("ERROR (io not loaded)");
+    alert("Socket.IO n’a pas pu se charger (io is undefined). Vérifie /socket.io/socket.io.js ou le CDN.");
+    return null;
+  }
+
+  socket = ioFn(window.location.origin, {
+    transports: ["websocket", "polling"],
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 600,
+    timeout: 20000,
+  });
+
+  window.socket = socket;
+
+  socket.on("connect", () => setSocketStatus(`connected (${socket.id})`));
+  socket.on("disconnect", () => setSocketStatus("disconnected"));
+  socket.on("connect_error", (err) => setSocketStatus(`error (${err?.message || "?"})`));
+
+  socket.on("chatHistory", (payload) => {
+    const p = cleanStr(payload?.project);
+    const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+    if (!currentProject || p !== currentProject) return;
+
+    clearChat();
+    if (msgs.length === 0) return addSystem(`Historique vide pour "${currentProject}".`);
+    addSystem(`Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
+
+    for (const m of msgs) addMessage(m);
+  });
+
+  socket.on("chatMessage", (data) => {
+    if (!currentProject) return;
+    const p = cleanStr(data?.project);
+    if (p && p !== currentProject) return;
+    addMessage(data);
+  });
+
+  socket.on("systemMessage", (msg) => {
+    if (!currentProject) return;
+    const p = cleanStr(msg?.project);
+    if (p && p !== currentProject) return;
+    addSystem(msg?.text || "Message système");
+  });
+
+  socket.on("presenceUpdate", (payload) => {
+    if (!currentProject) return;
+    const p = cleanStr(payload?.project);
+    if (p && p !== currentProject) return;
+    renderPresence(payload?.users);
+  });
+
+  socket.on("messageDeleted", ({ project, messageId }) => {
+    const p = cleanStr(project);
+    if (currentProject && p && p !== currentProject) return;
+    removeMessageNode(messageId);
+  });
+
+  socket.on("projectsUpdate", (payload) => {
+    const list = Array.isArray(payload?.projects) ? payload.projects : [];
+    setProjectsOptions(list, true);
+
+    const want = cleanStr(localStorage.getItem(LS_LAST_PROJECT));
+    if (want && list.includes(want)) projectSelect.value = want;
+
+    if (currentProject && !list.includes(currentProject)) {
+      currentProject = null;
+      setProjectLabel("—");
+      clearChat();
+      addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
+      renderPresence([]);
+    }
+
+    updateVoiceUiGate();
+  });
+
+  socket.on("projectDeleted", ({ project }) => {
+    const p = cleanStr(project);
+    if (currentProject && p === currentProject) {
+      currentProject = null;
+      setProjectLabel("—");
+      clearChat();
+      addSystem(`Le projet "${p}" a été supprimé.`);
+      renderPresence([]);
+    }
+  });
+
+  socket.on("projectError", (payload) => alert(payload?.message || "Erreur projet"));
+
+  socket.on("connect", async () => {
+    await loadProjectsOnce();
+    if (AUTO_JOIN) {
+      const u = cleanStr(usernameInput.value);
+      const p = cleanStr(projectSelect.value);
+      if (u && p && !currentProject) joinProject();
+    }
+  });
+
+  // initial fetch in case socket is slow
+  await loadProjectsOnce();
+
+  return socket;
+}
+
+/* ======================================================
+   INIT VOICE BAR
+   ====================================================== */
+
 (function initVoice() {
   if (!ENABLE_VOICE) return;
   ensureVoiceUI();
-  setVoiceButtonState();
   updateVoiceUiGate();
 })();
+
+/* ======================================================
+   CLEANUP
+   ====================================================== */
 
 window.addEventListener("beforeunload", () => {
   try { stopListening(); } catch {}
   try { stopRecording(); } catch {}
-  try { if (mediaStream) mediaStream.getTracks().forEach(t => t.stop()); } catch {}
+  try { if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop()); } catch {}
   try { if (audioCtx && audioCtx.state !== "closed") audioCtx.close(); } catch {}
+});
+
+/* ======================================================
+   START
+   ====================================================== */
+
+initSocket().catch((e) => {
+  console.error("initSocket failed", e);
+  setSocketStatus("ERROR (init failed)");
 });
