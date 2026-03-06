@@ -1,9 +1,16 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.4.6 — Root/SPA fallback + hardening ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.4.7 — Railway Socket stability + root/SPA fallback + hardening ✅
 // Aligné client ULTRA v3.4.5 :
 // - joinProject / presenceUpdate / chatMessage / chatHistory / projectsUpdate / createProject / deleteProject / deleteMessage
 // - /projects (HTTP) + /upload (HTTP) + /health (HTTP)
 // - Rooms Socket.IO = nom du projet (string)
 // - Présence temps réel
+//
+// Ajustements v3.4.7 :
+// - Socket.IO plus stable derrière Railway / reverse proxy
+// - pingInterval / pingTimeout explicités
+// - maxHttpBufferSize augmenté pour éviter certains rejets
+// - nettoyage léger / logs plus parlants
+// - arrêt propre du process
 
 "use strict";
 
@@ -20,14 +27,16 @@ const { Server } = require("socket.io");
 // =========================
 const app = express();
 
-// Trust proxy (Railway / reverse proxy) — utile pour IP/https
+// Trust proxy (Railway / reverse proxy)
 app.set("trust proxy", 1);
 
-// CORS large (comme toi)
-app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
-app.use(express.json({ limit: "2mb" }));
+// CORS large
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+}));
 
-// Small hardening / debug friendly
+app.use(express.json({ limit: "2mb" }));
 app.disable("x-powered-by");
 
 // =========================
@@ -48,7 +57,8 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // Version / Health
 // =========================
-const VERSION = "ultra-v3.4.6-root-fix";
+const VERSION = "ultra-v3.4.7-socket-stability";
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -56,6 +66,11 @@ app.get("/health", (_req, res) => {
     version: VERSION,
     ai: "disabled",
     web: "url-open only",
+    socket: {
+      transports: ["websocket", "polling"],
+      pingInterval: 25000,
+      pingTimeout: 60000,
+    },
   });
 });
 
@@ -67,6 +82,9 @@ const MESSAGES_FILE = path.join(STORAGE_DIR, "messages.json");
 
 let projects = loadJson(PROJECTS_FILE, ["test", "Evercell"]);
 let messagesByProject = loadJson(MESSAGES_FILE, {}); // { [project]: [messages...] }
+
+// ID monotone in-memory
+let nextId = computeNextId(messagesByProject);
 
 function saveAll() {
   saveJson(PROJECTS_FILE, projects);
@@ -91,13 +109,17 @@ const upload = multer({
       cb(null, `${Date.now()}_${safe}`);
     },
   }),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+  },
 });
 
 app.post("/upload", upload.single("file"), (req, res) => {
   try {
     const f = req.file;
-    if (!f) return res.status(400).json({ ok: false, error: "No file" });
+    if (!f) {
+      return res.status(400).json({ ok: false, error: "No file" });
+    }
 
     const url = `/uploads/${encodeURIComponent(f.filename)}`;
 
@@ -112,26 +134,36 @@ app.post("/upload", upload.single("file"), (req, res) => {
         username,
         userId,
         message: `📎 Fichier envoyé: ${f.originalname}`,
-        attachment: { url, filename: f.originalname, mimetype: f.mimetype },
+        attachment: {
+          url,
+          filename: f.originalname,
+          mimetype: f.mimetype,
+          size: f.size,
+        },
       });
 
       pushMessage(project, msg);
       io.to(project).emit("chatMessage", msg);
     }
 
-    res.json({ ok: true, url, filename: f.originalname, mimetype: f.mimetype });
+    return res.json({
+      ok: true,
+      url,
+      filename: f.originalname,
+      mimetype: f.mimetype,
+      size: f.size,
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("🔥 Upload error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
 // =========================
-// ✅ Root route explicite
-// (évite le flou du static si index.html pas trouvé)
+// Root route explicite
 // =========================
 app.get("/", (_req, res) => {
   if (fs.existsSync(INDEX_HTML)) {
-    // no-cache en dev pour éviter contenus “fantômes”
     res.setHeader("Cache-Control", "no-store");
     return res.sendFile(INDEX_HTML);
   }
@@ -144,8 +176,24 @@ app.get("/", (_req, res) => {
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+
+  // Important derrière Railway / reverse proxy
   transports: ["websocket", "polling"],
+  pingInterval: 25000,
+  pingTimeout: 60000,
+
+  // Laisse un peu de marge pour des payloads socket plus lourds
+  maxHttpBufferSize: 10 * 1024 * 1024,
+
+  // Tolérance utile si certains clients sont lents à se reconnecter
+  connectTimeout: 45000,
+
+  allowEIO3: false,
+  serveClient: false,
 });
 
 // =========================
@@ -168,7 +216,9 @@ function emitPresence(project) {
 }
 
 function presenceJoin(socket, project, username, userId) {
-  if (!presenceByProject.has(project)) presenceByProject.set(project, new Map());
+  if (!presenceByProject.has(project)) {
+    presenceByProject.set(project, new Map());
+  }
   presenceByProject.get(project).set(socket.id, { username, userId });
   emitPresence(project);
 }
@@ -177,7 +227,9 @@ function presenceLeave(socket, project) {
   const map = presenceByProject.get(project);
   if (map) {
     map.delete(socket.id);
-    if (map.size === 0) presenceByProject.delete(project);
+    if (map.size === 0) {
+      presenceByProject.delete(project);
+    }
   }
   emitPresence(project);
 }
@@ -194,35 +246,50 @@ io.on("connection", (socket) => {
 
   socket.on("createProject", ({ name } = {}, ack) => {
     const p = cleanStr(name);
+
     if (!isValidProjectName(p)) {
-      const resp = { ok: false, message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)" };
+      const resp = {
+        ok: false,
+        message: "Nom invalide (2-50, lettres/chiffres/espaces/_-.)",
+      };
       if (typeof ack === "function") ack(resp);
       return;
     }
+
     if (!projects.includes(p)) {
       projects.push(p);
       saveJson(PROJECTS_FILE, projects);
     }
+
     io.emit("projectsUpdate", { projects });
+
     const resp = { ok: true, project: p, projects };
     if (typeof ack === "function") ack(resp);
   });
 
-  socket.on("deleteProject", ({ project } = {}) => {
+  socket.on("deleteProject", ({ project } = {}, ack) => {
     const p = cleanStr(project);
-    if (!p) return;
+    if (!p) {
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
+      return;
+    }
 
     projects = projects.filter((x) => x !== p);
     delete messagesByProject[p];
 
     saveAll();
 
-    io.emit("projectsUpdate", { projects });
-    io.emit("projectDeleted", { project: p });
+    // Annonce avant purge room
+    io.to(p).emit("projectDeleted", { project: p });
 
-    // clear presence room
+    // Purge présence
     presenceByProject.delete(p);
+
+    // Mise à jour globale
+    io.emit("projectsUpdate", { projects });
     io.to(p).emit("presenceUpdate", { project: p, users: [] });
+
+    if (typeof ack === "function") ack({ ok: true, project: p });
   });
 
   socket.on("joinProject", ({ username, project, userId } = {}) => {
@@ -234,7 +301,9 @@ io.on("connection", (socket) => {
 
     const prev = socket.data.project;
     if (prev && prev !== p) {
-      try { socket.leave(prev); } catch {}
+      try {
+        socket.leave(prev);
+      } catch {}
       presenceLeave(socket, prev);
     }
 
@@ -247,17 +316,29 @@ io.on("connection", (socket) => {
     const hist = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
     socket.emit("chatHistory", { project: p, messages: hist });
 
-    io.to(p).emit("systemMessage", { project: p, text: `👋 ${u} a rejoint le projet.` });
+    io.to(p).emit("systemMessage", {
+      project: p,
+      text: `👋 ${u} a rejoint le projet.`,
+    });
 
     presenceJoin(socket, p, u, uid);
   });
 
   socket.on("leaveProject", () => {
-    const p = socket.data.project;
+    const p = cleanStr(socket.data.project);
     if (!p) return;
-    try { socket.leave(p); } catch {}
+
+    try {
+      socket.leave(p);
+    } catch {}
+
     presenceLeave(socket, p);
-    io.to(p).emit("systemMessage", { project: p, text: `👋 ${socket.data.username || "Un user"} a quitté le projet.` });
+
+    io.to(p).emit("systemMessage", {
+      project: p,
+      text: `👋 ${socket.data.username || "Un user"} a quitté le projet.`,
+    });
+
     socket.data.project = null;
   });
 
@@ -268,11 +349,17 @@ io.on("connection", (socket) => {
     const u = cleanStr(username) || cleanStr(socket.data.username) || "Anonyme";
     const uid = cleanStr(userId) || cleanStr(socket.data.userId) || "";
     const msg = cleanStr(message);
+
     if (!msg) return;
 
-    const row = makeMessage({ project: p, username: u, userId: uid, message: msg });
-    pushMessage(p, row);
+    const row = makeMessage({
+      project: p,
+      username: u,
+      userId: uid,
+      message: msg,
+    });
 
+    pushMessage(p, row);
     io.to(p).emit("chatMessage", row);
   });
 
@@ -305,53 +392,75 @@ io.on("connection", (socket) => {
     saveJson(MESSAGES_FILE, messagesByProject);
 
     io.to(p).emit("messageDeleted", { project: p, messageId: mid });
+
     if (typeof ack === "function") ack({ ok: true });
   });
 
   socket.on("disconnect", (reason) => {
-    const p = socket.data.project;
+    const p = cleanStr(socket.data.project);
     if (p) {
       presenceLeave(socket, p);
-      io.to(p).emit("systemMessage", { project: p, text: `💨 ${socket.data.username || "Un user"} s'est déconnecté.` });
+      io.to(p).emit("systemMessage", {
+        project: p,
+        text: `💨 ${socket.data.username || "Un user"} s'est déconnecté.`,
+      });
     }
+
     console.log("❌ disconnected", socket.id, reason);
+  });
+
+  socket.on("error", (err) => {
+    console.error("💥 socket error:", socket.id, err);
   });
 });
 
 // =========================
-// ✅ SPA fallback : si index.html existe, on le sert sur tout le reste
-// (à mettre après les routes API)
+// SPA fallback : si index.html existe, on le sert sur tout le reste
 // =========================
 app.get("*", (req, res) => {
-  // Laisse passer les routes d’API si tu en ajoutes plus tard
-  if (req.path.startsWith("/uploads/")) return res.status(404).end();
+  if (req.path.startsWith("/uploads/")) {
+    return res.status(404).end();
+  }
 
   if (fs.existsSync(INDEX_HTML)) {
     res.setHeader("Cache-Control", "no-store");
     return res.sendFile(INDEX_HTML);
   }
-  return res.status(404).json({ ok: false, error: "not_found", path: req.path });
+
+  return res.status(404).json({
+    ok: false,
+    error: "not_found",
+    path: req.path,
+  });
 });
 
 // =========================
-// Error handler Express (évite silence)
+// Error handler Express
 // =========================
 app.use((err, _req, res, _next) => {
   console.error("🔥 Express error:", err);
-  res.status(500).json({ ok: false, error: "server_error", detail: String(err?.message || err) });
+  res.status(500).json({
+    ok: false,
+    error: "server_error",
+    detail: String(err?.message || err),
+  });
 });
 
 // =========================
 // Helpers
 // =========================
-function cleanStr(v) { return String(v ?? "").trim(); }
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
 
 function isValidProjectName(name) {
   return /^[a-zA-Z0-9 _.\-]{2,50}$/.test(cleanStr(name));
 }
 
 function ensureDir(dir) {
-  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {}
 }
 
 function loadJson(file, fallback) {
@@ -366,11 +475,28 @@ function loadJson(file, fallback) {
 }
 
 function saveJson(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+  } catch (e) {
+    console.error("💥 saveJson error:", file, e);
+  }
 }
 
-// ID monotone in-memory
-let nextId = 1;
+function computeNextId(allMessages) {
+  try {
+    let maxId = 0;
+    for (const arr of Object.values(allMessages || {})) {
+      if (!Array.isArray(arr)) continue;
+      for (const msg of arr) {
+        const id = Number(msg?.id);
+        if (Number.isFinite(id) && id > maxId) maxId = id;
+      }
+    }
+    return maxId + 1;
+  } catch {
+    return 1;
+  }
+}
 
 function makeMessage({ project, username, userId, message, attachment }) {
   return {
@@ -386,12 +512,16 @@ function makeMessage({ project, username, userId, message, attachment }) {
 
 function pushMessage(project, msg) {
   const p = cleanStr(project);
-  if (!messagesByProject[p]) messagesByProject[p] = [];
+  if (!messagesByProject[p]) {
+    messagesByProject[p] = [];
+  }
+
   messagesByProject[p].push(msg);
 
   if (messagesByProject[p].length > 600) {
     messagesByProject[p] = messagesByProject[p].slice(-600);
   }
+
   saveJson(MESSAGES_FILE, messagesByProject);
 }
 
@@ -406,11 +536,39 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 // =========================
+// Graceful shutdown
+// =========================
+function shutdown(signal) {
+  console.log(`🛑 ${signal} received, shutting down...`);
+
+  try {
+    io.close(() => {
+      server.close(() => {
+        console.log("✅ HTTP/Socket server closed");
+        process.exit(0);
+      });
+    });
+
+    setTimeout(() => {
+      console.warn("⚠️ Forced shutdown timeout");
+      process.exit(1);
+    }, 10000).unref();
+  } catch (e) {
+    console.error("💥 shutdown error:", e);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+// =========================
 // Process-level safety logs
 // =========================
 process.on("unhandledRejection", (e) => {
   console.error("💥 unhandledRejection:", e);
 });
+
 process.on("uncaughtException", (e) => {
   console.error("💥 uncaughtException:", e);
 });
