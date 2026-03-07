@@ -1,17 +1,18 @@
 
-
-<!-- guibs:/index.html (COMPLET) — ULTRA v3.5.1 aligned (safe socket status + protected global) -->
+Correctifs inclus : script Socket.IO local prioritaire, fallback CDN, projet global visible dès le chargement, projet global protégé côté serveur et côté UI.
+ 
+<!-- guibs:/index.html (COMPLET) — ULTRA v3.5.2 aligned (safe socket status + protected global) -->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sensi-IA_travail_collaboratif</title>
-
+ 
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-
+ 
   <style>
     body{ font-family: Arial, sans-serif; margin:20px; max-width:1100px; }
     h1{ margin-bottom: 10px; }
@@ -42,37 +43,37 @@
     .ok{ color:#126a2b; }
   </style>
 </head>
-
+ 
 <body>
   <h1>Sensi-IA_travail_collaboratif 🚀</h1>
-
+ 
   <div id="statusbar">
     Statut: <span id="status-text">chargement…</span><span id="socket-status-host"></span>
   </div>
-
+ 
   <div class="topbar">
     <input type="text" id="username" placeholder="Pseudo" autocomplete="nickname" />
-    <select id="project"></select>
+    <select id="project"><option value="global">global (par défaut)</option></select>
     <button id="join-btn" type="button" disabled title="Chargement du socket...">Rejoindre</button>
   </div>
-
+ 
   <div class="topbar">
     <input type="text" id="new-project" placeholder="Nouveau projet (ex: EverCell)" />
     <button id="create-project-btn" type="button" disabled title="Chargement du socket...">+ Créer</button>
     <button id="delete-project-btn" type="button" class="danger" disabled title="Chargement du socket...">🗑️ Supprimer ce projet</button>
   </div>
-
+ 
   <div class="hint">
-    Chat + projets temps réel.<br/>
+    Chat + projets temps réel. Le projet <strong>global</strong> est créé par défaut et protégé.<br/>
     🎧 Reconnaissance vocale : dicte ton message puis dis <strong>"over"</strong> (ou <strong>"ouvre"</strong> / <strong>"terminé"</strong>) pour envoyer automatiquement<br/>
     📊 FFT affichée pendant l'écoute / l'enregistrement.<br/>
     🎙️ Envoi audio : Enregistrer → Envoyer audio.
   </div>
-
+ 
   <div class="layout">
     <div>
       <div id="chat" aria-live="polite"></div>
-
+ 
       <form id="chat-form" autocomplete="off">
         <input type="text" id="message" placeholder="Message..." autocomplete="off" />
         <input type="file" id="file" accept="image/*,audio/*,.pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.json" />
@@ -80,7 +81,7 @@
         <span class="upload-state" id="upload-state"></span>
       </form>
     </div>
-
+ 
     <aside class="panel">
       <h3>Users en ligne <span class="badge" id="users-count">—</span></h3>
       <div class="hint" style="margin:0 0 8px;">
@@ -89,7 +90,7 @@
       <ul id="users"></ul>
     </aside>
   </div>
-
+ 
   <script>
     (function loadSocketIO() {
       function inject(src, onload) {
@@ -100,34 +101,34 @@
         s.onerror = () => onload(new Error("load_failed"));
         document.head.appendChild(s);
       }
-
+ 
       inject("/socket.io/socket.io.js", (err) => {
         if (!err && window.io) return;
-
+ 
         inject("https://cdn.socket.io/4.7.5/socket.io.min.js", (err2) => {
           if (!err2 && window.io) return;
-
+ 
           const st = document.getElementById("socket-status-host") || document.getElementById("status-text");
           st.innerHTML = ` <span class="warn">| Socket.IO indisponible (script non chargé).</span>`;
         });
       });
     })();
   </script>
-
+ 
   <script src="/client.js"></script>
-
+ 
   <script>
     (async () => {
       const el = document.getElementById("status-text");
-
+ 
       try {
         const res = await fetch("/health", { cache: "no-store" });
         const data = await res.json();
-
+ 
         const v = data.version || "?";
         const ai = data.ai || "?";
         const web = data.web || "";
-
+ 
         el.innerHTML = `<span class="ok">OK ✅</span> | <code>${v}</code> | AI: <code>${ai}</code> | Web: <code>${web}</code>`;
       } catch {
         el.innerHTML = `<span class="warn">offline / health unreachable</span>`;

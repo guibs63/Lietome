@@ -1,10 +1,11 @@
 
-
-
-
+Correctifs inclus : script Socket.IO local prioritaire, fallback CDN, projet global visible dès le chargement, projet global protégé côté serveur et côté UI.
+ 
+ 
+ 
 // guibs:/server.js (COMPLET) — ULTRA v3.5.1 — protected global room + socket client local ✅
 // Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + génération docx/xlsx/pptx/png
-
+ 
 "use strict";
  
 const express = require("express");
@@ -51,7 +52,7 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.5.1-ai-workspace-safe-rooms";
+const VERSION = "ultra-v3.5.2-ai-workspace-safe-rooms";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
@@ -75,19 +76,19 @@ function normalizeProjects(list) {
   if (!cleaned.includes(DEFAULT_PROJECT)) cleaned.unshift(DEFAULT_PROJECT);
   return cleaned;
 }
-
+ 
 let projects = normalizeProjects(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT]));
 let messagesByProject = loadJson(MESSAGES_FILE, {});
 let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated } }
 let nextId = computeNextId(messagesByProject);
-
+ 
 function saveAll() {
   projects = normalizeProjects(projects);
   saveJson(PROJECTS_FILE, projects);
   saveJson(MESSAGES_FILE, messagesByProject);
   saveJson(META_FILE, projectMeta);
 }
-
+ 
 function ensureProjectMeta(project) {
   if (!projectMeta[project]) {
     projectMeta[project] = {
@@ -97,7 +98,7 @@ function ensureProjectMeta(project) {
   }
   return projectMeta[project];
 }
-
+ 
 function ensureDefaultProject() {
   projects = normalizeProjects(projects);
   if (!Array.isArray(messagesByProject[DEFAULT_PROJECT])) {
@@ -105,10 +106,10 @@ function ensureDefaultProject() {
   }
   ensureProjectMeta(DEFAULT_PROJECT);
 }
-
+ 
 ensureDefaultProject();
 saveAll();
-
+ 
 // =========================
 // Health
 // =========================
@@ -344,7 +345,7 @@ io.on("connection", (socket) => {
     io.emit("projectsUpdate", { projects });
     io.to(p).emit("presenceUpdate", { project: p, users: [] });
  
-    if (typeof ack === "function") ack({ ok: true, project: p, projects });
+    if (typeof ack === "function") ack({ ok: true, project: p, projects, fallbackProject: DEFAULT_PROJECT });
   });
  
   socket.on("joinProject", ({ username, project, userId } = {}) => {
