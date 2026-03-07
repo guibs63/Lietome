@@ -1,5 +1,4 @@
 
-Correctifs inclus : script Socket.IO local prioritaire, fallback CDN, projet global visible dès le chargement, projet global protégé côté serveur et côté UI.
  
  
  
