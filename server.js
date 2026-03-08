@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.6.5 — anti-duplicate message guard + voice-friendly robustness ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.6.3 — intuitive AI + media interpretation + username fix + deletable Sensi/legacy messages ✅
 
 "use strict";
 
@@ -51,7 +51,7 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.6.5-voice-robust-anti-duplicate";
+const VERSION = "ultra-v3.7.2-delete-sensi-export-share-aligned";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
@@ -438,11 +438,6 @@ io.on("connection", (socket) => {
     const msg = cleanStr(message);
     if (!msg) return;
 
-    if (isRecentDuplicateMessage(p, u, uid, msg)) {
-      console.warn("Duplicate message blocked server-side:", { project: p, username: u, message: msg });
-      return;
-    }
-
     const row = makeMessage({ project: p, username: u, userId: uid, message: msg });
     pushMessage(p, row);
     io.to(p).emit("chatMessage", row);
@@ -475,7 +470,7 @@ io.on("connection", (socket) => {
 
     const owner = cleanStr(arr[idx]?.userId);
     const author = cleanStr(arr[idx]?.username);
-    const isBot = isBotLikeUsername(author);
+    const isBot = isBotUsername(author);
     const isLegacyOrUnowned = !owner;
 
     const canDelete =
@@ -492,47 +487,111 @@ io.on("connection", (socket) => {
     messagesByProject[p] = arr;
     saveJson(MESSAGES_FILE, messagesByProject);
     io.to(p).emit("messageDeleted", { project: p, messageId: mid });
-    if (typeof ack === "function") ack({ ok: true });
+    if (typeof ack === "function") ack({ ok: true, messageId: mid });
   });
 
   socket.on("deleteSensiMessages", ({ project } = {}, ack) => {
     const p = cleanStr(project) || cleanStr(socket.data.project);
     if (!p) {
-      if (typeof ack === "function") ack({ ok: false, error: "bad_request", message: "Projet invalide." });
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
       return;
     }
 
     const arr = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
-    const deletedIds = arr.filter((m) => isBotLikeUsername(m?.username)).map((m) => Number(m.id)).filter(Number.isFinite);
-    const kept = arr.filter((m) => !isBotLikeUsername(m?.username));
+    const kept = [];
+    const deletedIds = [];
+
+    for (const msg of arr) {
+      if (isBotUsername(msg?.username)) {
+        if (Number.isFinite(Number(msg?.id))) deletedIds.push(Number(msg.id));
+      } else {
+        kept.push(msg);
+      }
+    }
+
     messagesByProject[p] = kept;
     saveJson(MESSAGES_FILE, messagesByProject);
+
     io.to(p).emit("bulkMessagesDeleted", { project: p, messageIds: deletedIds });
-    if (typeof ack === "function") ack({ ok: true, deletedCount: deletedIds.length });
+    io.to(p).emit("deleteSensiMessagesDone", { project: p, messageIds: deletedIds });
+
+    if (typeof ack === "function") {
+      ack({ ok: true, project: p, messageIds: deletedIds });
+    }
+  });
+
+  socket.on("deleteSensi", ({ project } = {}, ack) => {
+    const p = cleanStr(project) || cleanStr(socket.data.project);
+    if (!p) {
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
+      return;
+    }
+
+    const arr = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
+    const kept = [];
+    const deletedIds = [];
+
+    for (const msg of arr) {
+      if (isBotUsername(msg?.username)) {
+        if (Number.isFinite(Number(msg?.id))) deletedIds.push(Number(msg.id));
+      } else {
+        kept.push(msg);
+      }
+    }
+
+    messagesByProject[p] = kept;
+    saveJson(MESSAGES_FILE, messagesByProject);
+
+    io.to(p).emit("bulkMessagesDeleted", { project: p, messageIds: deletedIds });
+    io.to(p).emit("deleteSensiMessagesDone", { project: p, messageIds: deletedIds });
+
+    if (typeof ack === "function") {
+      ack({ ok: true, project: p, messageIds: deletedIds });
+    }
   });
 
   socket.on("exportProject", ({ project } = {}, ack) => {
-    const p = cleanStr(project) || cleanStr(socket.data.project) || DEFAULT_PROJECT;
+    const p = cleanStr(project) || cleanStr(socket.data.project);
+    if (!p) {
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
+      return;
+    }
+
     try {
-      const payload = buildProjectExport(p);
-      const filename = `${Date.now()}_${safeFileName(`export_${p}.json`)}`;
-      const fullPath = path.join(GENERATED_DIR, filename);
-      fs.writeFileSync(fullPath, JSON.stringify(payload, null, 2), "utf8");
-      if (typeof ack === "function") ack({ ok: true, filename, url: `/uploads/generated/${encodeURIComponent(filename)}` });
+      const exported = writeProjectExportFile(p);
+      if (typeof ack === "function") {
+        ack({
+          ok: true,
+          project: p,
+          url: exported.url,
+          filename: exported.filename,
+        });
+      }
     } catch (e) {
-      if (typeof ack === "function") ack({ ok: false, error: "export_failed", message: String(e?.message || e) });
+      console.error("🔥 exportProject error:", e);
+      if (typeof ack === "function") {
+        ack({ ok: false, error: "export_failed", message: String(e?.message || e) });
+      }
     }
   });
 
   socket.on("shareProject", ({ project, email } = {}, ack) => {
-    const p = cleanStr(project) || cleanStr(socket.data.project) || DEFAULT_PROJECT;
+    const p = cleanStr(project) || cleanStr(socket.data.project);
     const to = cleanStr(email);
-    if (!to || !/^.+@.+\..+$/.test(to)) {
-      if (typeof ack === "function") ack({ ok: false, error: "bad_email", message: "Adresse mail invalide." });
+    if (!p || !to) {
+      if (typeof ack === "function") ack({ ok: false, error: "bad_request" });
       return;
     }
-    const mailto = buildProjectShareMailto(p, to);
-    if (typeof ack === "function") ack({ ok: true, mailto });
+
+    if (typeof ack === "function") {
+      ack({
+        ok: true,
+        project: p,
+        email: to,
+        mode: "client_mailto",
+        message: "Le partage email est préparé côté client via mailto."
+      });
+    }
   });
 
   socket.on("disconnect", (reason) => {
@@ -594,10 +653,6 @@ function shouldInvokeAI(message) {
     "génère",
     "genere",
     "cherche",
-    "dessine",
-    "dessinne",
-    "illustre",
-    "imagine",
   ];
 
   const naturalContains = [
@@ -619,13 +674,6 @@ function shouldInvokeAI(message) {
     "explique cette image",
     "décris cette image",
     "decris cette image",
-    "dessine-toi",
-    "dessine toi",
-    "fais un plan",
-    "crée un plan",
-    "cree un plan",
-    "génère une image",
-    "genere une image",
   ];
 
   return naturalStarts.some((x) => m.startsWith(x)) || naturalContains.some((x) => m.includes(x));
@@ -754,12 +802,6 @@ async function handleAIRequest({ project, username, userId, message, internal = 
   if (lower.startsWith("/image ")) {
     const brief = cleanStr(raw.slice(7));
     const generated = await generateImageForProject(project, brief, username);
-    await emitGeneratedFile(project, generated, "🖼️ Image générée.");
-    return;
-  }
-
-  if (isNaturalImageRequest(raw)) {
-    const generated = await generateImageForProject(project, extractNaturalPrompt(raw), username);
     await emitGeneratedFile(project, generated, "🖼️ Image générée.");
     return;
   }
@@ -1317,6 +1359,39 @@ app.use((err, _req, res, _next) => {
 // =========================
 function cleanStr(v) {
   return String(v ?? "").trim();
+}
+
+function isBotUsername(value) {
+  const v = cleanStr(value).toLowerCase();
+  const bot = cleanStr(AI_BOT_NAME).toLowerCase();
+  return v === bot || v === `✨ ${bot}` || v.endsWith(` ${bot}`) || v.includes(bot);
+}
+
+function buildProjectExportPayload(project) {
+  const p = cleanStr(project) || DEFAULT_PROJECT;
+  const list = Array.isArray(messagesByProject[p]) ? messagesByProject[p] : [];
+  const meta = ensureProjectMeta(p);
+  return {
+    ok: true,
+    exportedAt: new Date().toISOString(),
+    version: VERSION,
+    project: p,
+    messageCount: list.length,
+    messages: list,
+    meta,
+  };
+}
+
+function writeProjectExportFile(project) {
+  const payload = buildProjectExportPayload(project);
+  const filename = `${safeFileName(payload.project)}_export_${Date.now()}.json`;
+  const fullPath = path.join(GENERATED_DIR, filename);
+  fs.writeFileSync(fullPath, JSON.stringify(payload, null, 2), "utf8");
+  return {
+    filename,
+    fullPath,
+    url: `/uploads/generated/${encodeURIComponent(filename)}`,
+  };
 }
 
 function normalizeDisplayName(value) {
