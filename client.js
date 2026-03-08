@@ -725,7 +725,7 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
   row.className = "msg msg-row";
   if (Number.isFinite(mid)) row.dataset.mid = String(mid);
 
-  const canDelete = cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId);
+  const canDelete = (cleanStr(userId) && cleanStr(userId) === cleanStr(myUserId)) || detectIsSensiMessage(username);
   const isSensi = detectIsSensiMessage(username);
 
   row.innerHTML = `

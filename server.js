@@ -1,5 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.6.0 — intuitive AI + file/media interpretation + auto analyze ✅
-// Base stable Railway/Socket + IA OpenAI (Responses API) + transcription + interprétation docs/images/audio + génération docx/xlsx/pptx/png
+// guibs:/server.js (COMPLET) — ULTRA v3.6.3 — intuitive AI + media interpretation + username fix + deletable Sensi/legacy messages ✅
 
 "use strict";
 
@@ -52,15 +51,13 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.6.0-intuitive-ai-file-interpreter";
+const VERSION = "ultra-v3.6.3-intuitive-ai-file-interpreter-deletefix";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
-
 const MODEL_TEXT = cleanStr(process.env.OPENAI_MODEL_TEXT) || "gpt-4.1-mini";
 const MODEL_WEB = cleanStr(process.env.OPENAI_MODEL_WEB) || "gpt-5";
 const MODEL_IMAGE = cleanStr(process.env.OPENAI_MODEL_IMAGE) || "gpt-4.1-mini";
 const MODEL_TRANSCRIBE = cleanStr(process.env.OPENAI_MODEL_TRANSCRIBE) || "gpt-4o-mini-transcribe";
-
 const AI_BOT_NAME = cleanStr(process.env.AI_BOT_NAME) || "Sensi";
 const DEFAULT_PROJECT = "global";
 
@@ -75,7 +72,7 @@ const openai = AI_ENABLED ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 // =========================
 let projects = normalizeProjects(loadJson(PROJECTS_FILE, [DEFAULT_PROJECT, "Evercell"]));
 let messagesByProject = loadJson(MESSAGES_FILE, {});
-let projectMeta = loadJson(META_FILE, {}); // { [project]: { latestAttachment, lastGenerated, latestAnalysis } }
+let projectMeta = loadJson(META_FILE, {});
 let nextId = computeNextId(messagesByProject);
 
 ensureDefaultProjectState();
@@ -186,7 +183,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     if (project && !projectExists(project)) project = DEFAULT_PROJECT;
     if (!project) project = DEFAULT_PROJECT;
 
-    const username = cleanStr(req.body?.username) || "Anonyme";
+    const username = normalizeDisplayName(req.body?.username || "Anonyme");
     const userId = cleanStr(req.body?.userId) || "";
 
     const meta = ensureProjectMeta(project);
@@ -258,11 +255,13 @@ app.post("/transcribe", upload.single("audio"), async (req, res) => {
       return res.status(400).json({ ok: false, error: "No audio" });
     }
 
+    const hint = cleanStr(req.body?.prompt) || "Le mot de fin possible peut être : over, ouvre, terminé, au revoir.";
     const transcript = await openai.audio.transcriptions.create({
       file: fs.createReadStream(req.file.path),
       model: MODEL_TRANSCRIBE,
       response_format: "json",
       language: "fr",
+      prompt: hint,
     });
 
     return res.json({ ok: true, text: cleanStr(transcript?.text) });
@@ -317,7 +316,10 @@ function presenceJoin(socket, project, username, userId) {
   if (!presenceByProject.has(project)) {
     presenceByProject.set(project, new Map());
   }
-  presenceByProject.get(project).set(socket.id, { username, userId });
+  presenceByProject.get(project).set(socket.id, {
+    username: normalizeDisplayName(username),
+    userId: cleanStr(userId) || "",
+  });
   emitPresence(project);
 }
 
@@ -394,7 +396,7 @@ io.on("connection", (socket) => {
 
   socket.on("joinProject", ({ username, project, userId } = {}) => {
     let p = cleanStr(project);
-    const u = cleanStr(username) || "Anonyme";
+    const u = normalizeDisplayName(username || "Anonyme");
     const uid = cleanStr(userId) || "";
     ensureDefaultProjectState();
     if (!p || !projectExists(p)) {
@@ -423,7 +425,7 @@ io.on("connection", (socket) => {
     if (!p) return;
     try { socket.leave(p); } catch {}
     presenceLeave(socket, p);
-    io.to(p).emit("systemMessage", { project: p, text: `👋 ${socket.data.username || "Un user"} a quitté le projet.` });
+    io.to(p).emit("systemMessage", { project: p, text: `👋 ${normalizeDisplayName(socket.data.username || "Un user")} a quitté le projet.` });
     socket.data.project = null;
   });
 
@@ -431,7 +433,7 @@ io.on("connection", (socket) => {
     const p = cleanStr(project) || cleanStr(socket.data.project);
     if (!p) return;
 
-    const u = cleanStr(username) || cleanStr(socket.data.username) || "Anonyme";
+    const u = normalizeDisplayName(username || socket.data.username || "Anonyme");
     const uid = cleanStr(userId) || cleanStr(socket.data.userId) || "";
     const msg = cleanStr(message);
     if (!msg) return;
@@ -467,7 +469,16 @@ io.on("connection", (socket) => {
     }
 
     const owner = cleanStr(arr[idx]?.userId);
-    if (owner && uid && owner !== uid) {
+    const author = cleanStr(arr[idx]?.username);
+    const isBot = author.toLowerCase() === cleanStr(AI_BOT_NAME).toLowerCase();
+    const isLegacyOrUnowned = !owner;
+
+    const canDelete =
+      (owner && uid && owner === uid) ||
+      isBot ||
+      isLegacyOrUnowned;
+
+    if (!canDelete) {
       if (typeof ack === "function") ack({ ok: false, error: "forbidden" });
       return;
     }
@@ -483,7 +494,7 @@ io.on("connection", (socket) => {
     const p = cleanStr(socket.data.project);
     if (p) {
       presenceLeave(socket, p);
-      io.to(p).emit("systemMessage", { project: p, text: `💨 ${socket.data.username || "Un user"} s'est déconnecté.` });
+      io.to(p).emit("systemMessage", { project: p, text: `💨 ${normalizeDisplayName(socket.data.username || "Un user")} s'est déconnecté.` });
     }
     console.log("❌ disconnected", socket.id, reason);
   });
@@ -567,36 +578,14 @@ function shouldInvokeAI(message) {
 function isLikelyWebQuery(message) {
   const m = cleanStr(message).toLowerCase();
   if (!m) return false;
-
   if (m.startsWith("/web")) return true;
 
   const keywords = [
-    "actualité",
-    "actualite",
-    "news",
-    "prix",
-    "cours",
-    "tendance",
-    "marché",
-    "marche",
-    "aujourd'hui",
-    "aujourdhui",
-    "ce matin",
-    "ce soir",
-    "en ce moment",
-    "dernier",
-    "dernière",
-    "derniere",
-    "derniers",
-    "dernières",
-    "date",
-    "heure",
-    "météo",
-    "meteo",
-    "qui est le président",
-    "qui est le president",
-    "qui est le ceo",
-    "qui dirige",
+    "actualité", "actualite", "news", "prix", "cours", "tendance",
+    "marché", "marche", "aujourd'hui", "aujourdhui", "ce matin",
+    "ce soir", "en ce moment", "dernier", "dernière", "derniere",
+    "derniers", "dernières", "date", "heure", "météo", "meteo",
+    "qui est le président", "qui est le president", "qui est le ceo", "qui dirige",
   ];
 
   return keywords.some((k) => m.includes(k));
@@ -606,22 +595,10 @@ function refersToLatestAttachment(message) {
   const m = cleanStr(message).toLowerCase();
   if (!m) return false;
   const refs = [
-    "ce fichier",
-    "ce document",
-    "ce pdf",
-    "ce doc",
-    "ce docx",
-    "ce xlsx",
-    "ce pptx",
-    "cette image",
-    "cet audio",
-    "la pièce jointe",
-    "la piece jointe",
-    "le fichier envoyé",
-    "le fichier envoye",
-    "le dernier fichier",
-    "le document envoyé",
-    "le document envoye",
+    "ce fichier", "ce document", "ce pdf", "ce doc", "ce docx", "ce xlsx", "ce pptx",
+    "cette image", "cet audio", "la pièce jointe", "la piece jointe",
+    "le fichier envoyé", "le fichier envoye", "le dernier fichier",
+    "le document envoyé", "le document envoye",
   ];
   return refs.some((x) => m.includes(x));
 }
@@ -675,13 +652,13 @@ async function handleAIRequest({ project, username, userId, message, internal = 
 
   if (lower.startsWith("/web ")) {
     const query = cleanStr(raw.slice(5));
-    const answer = await askAIWithWeb(query, { project, username });
+    const answer = await askAIWithWeb(query);
     await emitBotText(project, answer.text);
     return;
   }
 
   if (!lower.startsWith("/web ") && isLikelyWebQuery(raw) && !refersToLatestAttachment(raw) && !lower.includes("fichier") && !lower.includes("document")) {
-    const answer = await askAIWithWeb(raw, { project, username });
+    const answer = await askAIWithWeb(raw);
     await emitBotText(project, answer.text);
     return;
   }
@@ -689,7 +666,7 @@ async function handleAIRequest({ project, username, userId, message, internal = 
   if (isInterpretCommand(raw)) {
     const meta = ensureProjectMeta(project);
     if (!meta.latestAttachment?.path) {
-      await emitBotText(project, "📎 Aucun fichier récent à interpréter dans ce projet.");
+      await emitBotText(project, "📎 Aucun fichier récent à analyser dans ce projet.");
       return;
     }
     const answer = await analyzeProjectFile(project, raw, { internal, username, userId });
@@ -753,7 +730,7 @@ async function askAIText(prompt, ctx = {}) {
     "Quand l'utilisateur demande un livrable, structure ta réponse pour être directement exploitable.",
     "Quand la demande semble ambiguë mais exploitable, fais une hypothèse raisonnable au lieu de bloquer.",
     `Projet courant : ${ctx.project || "inconnu"}.`,
-    `Utilisateur courant : ${ctx.username || "inconnu"}.`,
+    `Utilisateur courant : ${normalizeDisplayName(ctx.username || "inconnu")}.`,
     history ? `Contexte récent du projet :\n${history}` : "",
   ].filter(Boolean).join("\n");
 
@@ -766,20 +743,12 @@ async function askAIText(prompt, ctx = {}) {
   return { text: cleanStr(response.output_text) || "(aucune réponse)" };
 }
 
-async function askAIWithWeb(prompt, ctx = {}) {
-  const history = buildConversationContext(ctx.project, 6);
-
+async function askAIWithWeb(prompt) {
   const response = await openai.responses.create({
     model: MODEL_WEB,
     tools: [{ type: "web_search" }],
     include: ["web_search_call.action.sources"],
-    instructions: [
-      "Réponds en français.",
-      "Sois factuelle, utile, concise mais exploitable.",
-      "Quand l'information est actuelle, indique explicitement qu'il s'agit d'une information web.",
-      history ? `Contexte projet utile :\n${history}` : "",
-      "Cite clairement les sources pertinentes à la fin avec leur URL.",
-    ].filter(Boolean).join("\n"),
+    instructions: "Réponds en français. Cite clairement les sources pertinentes à la fin avec leur URL.",
     input: prompt,
   });
 
@@ -791,7 +760,7 @@ async function askAIWithWeb(prompt, ctx = {}) {
   return { text };
 }
 
-async function analyzeProjectFile(project, userPrompt, opts = {}) {
+async function analyzeProjectFile(project, userPrompt) {
   const meta = ensureProjectMeta(project);
   const att = meta.latestAttachment;
   if (!att?.path) {
@@ -933,6 +902,7 @@ async function analyzeAudioAttachment(att, userPrompt, project) {
     model: MODEL_TRANSCRIBE,
     response_format: "json",
     language: "fr",
+    prompt: "Le mot de fin possible peut être : over, ouvre, terminé, au revoir.",
   });
 
   const transcriptText = cleanStr(transcript?.text);
@@ -974,7 +944,7 @@ async function generateDocxForProject(project, brief, username) {
       '{"title":"...","subtitle":"...","sections":[{"heading":"...","bullets":["..."],"paragraph":"..."}]}',
       "4 à 6 sections maximum. Français. Pas de markdown.",
       `Projet : ${project}`,
-      `Utilisateur : ${username || "inconnu"}`,
+      `Utilisateur : ${normalizeDisplayName(username || "inconnu")}`,
       `Brief : ${brief}`,
     ].join("\n")
   );
@@ -1036,7 +1006,7 @@ async function generateXlsxForProject(project, brief, username) {
       '{"title":"...","columns":["Colonne 1","Colonne 2","Colonne 3"],"rows":[["...","...","..."]]}',
       "6 à 12 lignes utiles. Français. Pas de markdown.",
       `Projet : ${project}`,
-      `Utilisateur : ${username || "inconnu"}`,
+      `Utilisateur : ${normalizeDisplayName(username || "inconnu")}`,
       `Brief : ${brief}`,
     ].join("\n")
   );
@@ -1097,7 +1067,7 @@ async function generatePptxForProject(project, brief, username) {
       '{"title":"...","slides":[{"title":"...","bullets":["...","..."]}]}',
       "4 à 6 slides maximum, 3 à 5 bullets par slide. Français. Pas de markdown.",
       `Projet : ${project}`,
-      `Utilisateur : ${username || "inconnu"}`,
+      `Utilisateur : ${normalizeDisplayName(username || "inconnu")}`,
       `Brief : ${brief}`,
     ].join("\n")
   );
@@ -1258,7 +1228,7 @@ function buildGeneratedAttachment(project, fullPath, url, filename, mimetype, re
     mimetype,
     size: safeStatSize(fullPath),
   };
-  return { project, fullPath, attachment, requestedBy };
+  return { project, fullPath, attachment, requestedBy: normalizeDisplayName(requestedBy) };
 }
 
 // =========================
@@ -1285,6 +1255,37 @@ app.use((err, _req, res, _next) => {
 // =========================
 function cleanStr(v) {
   return String(v ?? "").trim();
+}
+
+function normalizeDisplayName(value) {
+  let s = cleanStr(value);
+  if (!s) return "Anonyme";
+
+  s = s.replace(/\s+/g, " ").trim();
+
+  if (s.length >= 4 && s.length % 2 === 0) {
+    const half = s.length / 2;
+    const a = s.slice(0, half);
+    const b = s.slice(half);
+    if (a && b && a.toLowerCase() === b.toLowerCase()) {
+      s = a;
+    }
+  }
+
+  const parts = s.split(" ").filter(Boolean);
+  if (parts.length >= 2) {
+    const deduped = [];
+    for (const part of parts) {
+      const prev = deduped[deduped.length - 1];
+      if (prev && prev.toLowerCase() === part.toLowerCase()) continue;
+      deduped.push(part);
+    }
+    s = deduped.join(" ");
+  }
+
+  s = s.replace(/^(.{2,40})\1+$/i, "$1").trim();
+
+  return s || "Anonyme";
 }
 
 function ensureDir(dir) {
@@ -1335,7 +1336,7 @@ function makeMessage({ project, username, userId, message, attachment }) {
     id: nextId++,
     ts: Date.now(),
     project: cleanStr(project),
-    username: cleanStr(username) || "Anonyme",
+    username: normalizeDisplayName(username),
     userId: cleanStr(userId) || "",
     message: cleanStr(message) || "",
     attachment: attachment || null,
@@ -1389,7 +1390,7 @@ function buildConversationContext(project, limit = 8) {
   const slice = arr.slice(-Math.max(0, limit));
   return slice
     .map((m) => {
-      const u = cleanStr(m?.username) || "Anonyme";
+      const u = normalizeDisplayName(m?.username || "Anonyme");
       const txt = cleanStr(m?.message);
       if (!txt) return "";
       return `${u}: ${truncate(txt, 500)}`;
