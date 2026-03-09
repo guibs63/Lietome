@@ -1,4 +1,4 @@
-// guibs:/server.js (COMPLET) — ULTRA v3.8.2 — base réelle préservée + memory + style tu/vous + emoji interpretation + natural image/doc triggers ✅
+// guibs:/server.js (COMPLET) — ULTRA v3.8.2 — base réelle préservée + memory + style tu/vous + emoji interpretation + natural image/doc triggers + memory delete + intuitive questions ✅
 
 "use strict";
 
@@ -52,7 +52,7 @@ app.use(express.static(ROOT, { fallthrough: true }));
 // =========================
 // AI config
 // =========================
-const VERSION = "ultra-v3.8.2-base-real-preserved-memory-style-emoji";
+const VERSION = "ultra-v3.8.2-base-real-preserved-memory-style-emoji-memory-delete-intuitive-questions";
 const OPENAI_API_KEY = cleanStr(process.env.OPENAI_API_KEY);
 const AI_ENABLED = Boolean(OPENAI_API_KEY);
 
@@ -185,6 +185,27 @@ function saveUserMemory(username, text, project = DEFAULT_PROJECT) {
   mem.updatedAt = Date.now();
   saveJson(MEMORY_FILE, userMemories);
   return entry;
+}
+
+function deleteUserMemory(username, textToDelete = "") {
+  const mem = ensureUserMemory(username);
+  const target = cleanStr(textToDelete).toLowerCase();
+  if (!target) return false;
+
+  const before = mem.notes.length;
+  mem.notes = mem.notes.filter((x) => cleanStr(x?.text).toLowerCase() !== target);
+  mem.updatedAt = Date.now();
+  saveJson(MEMORY_FILE, userMemories);
+  return mem.notes.length !== before;
+}
+
+function clearAllUserMemory(username) {
+  const mem = ensureUserMemory(username);
+  mem.notes = [];
+  mem.preferences = { address_style: "" };
+  mem.updatedAt = Date.now();
+  saveJson(MEMORY_FILE, userMemories);
+  return true;
 }
 
 function setAddressStylePreference(username, style) {
@@ -381,6 +402,8 @@ app.get("/health", (_req, res) => {
       emoji_markers: true,
       export_project: true,
       share_project: true,
+      memory_delete: true,
+      intuitive_questions: true,
     },
   });
 });
@@ -689,11 +712,50 @@ io.on("connection", (socket) => {
       const stylePref = detectAddressStylePreferenceRequest(msg);
       if (stylePref) {
         setAddressStylePreference(u, stylePref);
+
+        const normalizedMsg = cleanStr(msg).toLowerCase();
+        const asksHowAreYou =
+          normalizedMsg.includes("ça va") ||
+          normalizedMsg.includes("ca va") ||
+          normalizedMsg.includes("comment vas-tu") ||
+          normalizedMsg.includes("comment vas tu") ||
+          normalizedMsg.includes("comment allez-vous") ||
+          normalizedMsg.includes("comment allez vous");
+
+        let reply = "";
+        if (stylePref === "tu") {
+          reply = asksHowAreYou
+            ? "Bien sûr 🙂 Je te tutoie désormais. Et pour te répondre : ça va bien, merci — et toi ?"
+            : "Bien sûr 🙂 Je te tutoie désormais.";
+        } else {
+          reply = asksHowAreYou
+            ? "Bien sûr 🙂 Je vous vouvoierai désormais. Et pour vous répondre : je vais bien, merci — et vous ?"
+            : "Bien sûr 🙂 Je vous vouvoierai désormais.";
+        }
+
+        await emitBotText(p, reply);
+        return;
+      }
+
+      const memoryDeleteReq = detectMemoryDeleteRequest(msg);
+      if (memoryDeleteReq.shouldDelete) {
+        if (memoryDeleteReq.deleteAll) {
+          clearAllUserMemory(u);
+          await emitBotText(p, "🧠 C’est oublié. J’ai effacé tes mémoires persistantes et tes préférences.");
+          return;
+        }
+
+        if (!memoryDeleteReq.content) {
+          await emitBotText(p, "🧠 Je n’ai rien trouvé de précis à oublier.");
+          return;
+        }
+
+        const deleted = deleteUserMemory(u, memoryDeleteReq.content);
         await emitBotText(
           p,
-          stylePref === "tu"
-            ? "🧠 C'est noté : je peux te tutoyer 🙂"
-            : "🧠 C'est noté : je te vouvoierai 🙂"
+          deleted
+            ? `🧠 C’est oublié : ${memoryDeleteReq.content}`
+            : `🧠 Je n’ai pas retrouvé cette mémoire : ${memoryDeleteReq.content}`
         );
         return;
       }
@@ -918,6 +980,17 @@ function shouldInvokeAI(message) {
     return true;
   }
 
+  if (m.includes("?")) return true;
+
+  const questionStarts = [
+    "qui", "quoi", "quand", "comment", "pourquoi", "ou", "où",
+    "combien", "quel", "quelle", "quels", "quelles",
+    "est-ce que", "est ce que", "peux-tu", "peux tu",
+    "pouvez-vous", "pouvez vous", "tu peux", "vous pouvez"
+  ];
+
+  if (questionStarts.some((x) => m.startsWith(x + " "))) return true;
+
   const naturalStarts = [
     "sensi",
     "hey sensi",
@@ -1113,10 +1186,15 @@ function detectAddressStylePreferenceRequest(message) {
   const tuPatterns = [
     "tutoie-moi",
     "tutoie moi",
+    "tutoi-moi",
+    "tutoi moi",
     "tu peux me tutoyer",
     "on peut se tutoyer",
     "je préfère le tutoiement",
     "je prefere le tutoiement",
+    "parle-moi en me tutoyant",
+    "parle moi en me tutoyant",
+    "tutoiement",
   ];
 
   const vousPatterns = [
@@ -1126,6 +1204,9 @@ function detectAddressStylePreferenceRequest(message) {
     "je préfère le vouvoiement",
     "je prefere le vouvoiement",
     "merci de me vouvoyer",
+    "parle-moi en me vouvoyant",
+    "parle moi en me vouvoyant",
+    "vouvoiement",
   ];
 
   if (tuPatterns.some((x) => m.includes(x))) return "tu";
@@ -1162,6 +1243,46 @@ function detectMemorySaveRequest(message) {
     .trim();
 
   return { shouldSave: true, content };
+}
+
+function detectMemoryDeleteRequest(message) {
+  const raw = cleanStr(message);
+  const lower = raw.toLowerCase();
+
+  const resetAllTriggers = [
+    "oublie tout",
+    "efface tout ce que tu sais sur moi",
+    "supprime toutes mes mémoires",
+    "supprime toutes mes memoires",
+    "reset mémoire",
+    "reset memoire",
+    "efface ma mémoire",
+    "efface ma memoire",
+  ];
+
+  if (resetAllTriggers.some((t) => lower.includes(t))) {
+    return { shouldDelete: true, deleteAll: true, content: "" };
+  }
+
+  const targetedTriggers = [
+    "oublie ça",
+    "oublie ca",
+    "efface cette mémoire",
+    "efface cette memoire",
+    "supprime cette mémoire",
+    "supprime cette memoire",
+  ];
+
+  const shouldDelete = targetedTriggers.some((t) => lower.startsWith(t) || lower.includes(t));
+  if (!shouldDelete) return { shouldDelete: false, deleteAll: false, content: "" };
+
+  let content = raw
+    .replace(/^.*?oublie\s+[çc]a\s*[:,-]?\s*/i, "")
+    .replace(/^.*?efface\s+cette\s+m[ée]moire\s*[:,-]?\s*/i, "")
+    .replace(/^.*?supprime\s+cette\s+m[ée]moire\s*[:,-]?\s*/i, "")
+    .trim();
+
+  return { shouldDelete: true, deleteAll: false, content };
 }
 
 async function handleAIRequest({ project, username, userId, message, sourceMessage = "", internal = false }) {
@@ -1208,6 +1329,8 @@ async function handleAIRequest({ project, username, userId, message, sourceMessa
       "• dessine-toi en version réaliste\n" +
       "• fais un plan de bureau\n" +
       "• mémorise ça : Mel est mon épouse\n" +
+      "• oublie ça : Mel est mon épouse\n" +
+      "• efface ma mémoire\n" +
       "• tu peux me tutoyer\n" +
       "• vouvoie-moi"
     );
@@ -1344,6 +1467,8 @@ async function askAIText(prompt, ctx = {}) {
     "Quand la demande semble ambiguë mais exploitable, fais une hypothèse raisonnable au lieu de bloquer.",
     "Quand l'utilisateur demande une image, un plan visuel, un schéma ou un dessin, comprends que c'est une demande de génération d'image.",
     "Tu reconnais aussi les marqueurs émotionnels comme *flowers*, *hug*, *heart*, etc., et tu peux répondre avec chaleur sans excès.",
+    "Quand l'utilisateur change le ton relationnel (tutoiement/vouvoiement), applique ce style immédiatement et naturellement.",
+    "Quand un message contient à la fois une préférence de style et une intention conversationnelle, réponds aux deux au lieu de te limiter à un simple accusé de réception.",
     effectiveStyle === "tu" ? "Préférence active : réponds en tutoyant." : "",
     effectiveStyle === "vous" ? "Préférence active : réponds en vouvoyant." : "",
     `Projet courant : ${ctx.project || "inconnu"}.`,

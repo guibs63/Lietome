@@ -1,4 +1,4 @@
-// guibs:/client.js (COMPLET) — ULTRA v3.8.2 CLIENT — compatible server v3.8.2
+// guibs:/client.js (COMPLET) — ULTRA v3.8.2 CLIENT — notify sound + paste upload + share + voice + delete + intuitive UX ✅
 "use strict";
 
 /* ======================================================
@@ -56,6 +56,7 @@ let sensiLastHealth = null;
 let shareProjectWrap = null;
 let shareProjectEmailInput = null;
 let shareProjectSendBtn = null;
+let soundToggleBtn = null;
 
 (function assertDom() {
   const required = [
@@ -135,7 +136,7 @@ function setAiStatus(txt) {
 }
 
 /* ======================================================
-   LOCAL STORAGE / IDs
+   LOCAL STORAGE / IDs / SOUND
    ====================================================== */
 
 const AUTO_JOIN = false;
@@ -144,12 +145,54 @@ const LS_USER_ID = "sensi_user_id";
 const LS_LAST_USERNAME = "sensi_last_username";
 const LS_LAST_PROJECT = "sensi_last_project";
 const LS_LAST_HEALTH = "sensi_last_health";
+const LS_SOUND_ENABLED = "sensi_sound_enabled";
 
 const SEND_DEDUP_MS = 1500;
 let lastSentSignature = "";
 let lastSentAt = 0;
 let voiceInputBase = "";
 let voiceAutoSending = false;
+
+let soundEnabled = true;
+try {
+  const saved = localStorage.getItem(LS_SOUND_ENABLED);
+  if (saved === "0") soundEnabled = false;
+} catch {}
+
+function refreshSoundToggle() {
+  if (!soundToggleBtn) return;
+  soundToggleBtn.textContent = soundEnabled ? "🔔 Son ON ✨" : "🔕 Son OFF";
+}
+
+function playNotify() {
+  if (!soundEnabled) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.12);
+
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.04, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start();
+    osc.stop(ctx.currentTime + 0.18);
+
+    setTimeout(() => {
+      try { ctx.close(); } catch {}
+    }, 300);
+  } catch {}
+}
 
 function normalizedMessageSignature(project, username, text) {
   return [
@@ -289,21 +332,6 @@ function detectIsSensiMessage(username) {
   return u === "sensi" || u === "✨ sensi";
 }
 
-function insertTextAtCursor(el, text) {
-  if (!el) return;
-  const value = String(el.value || "");
-  const start = typeof el.selectionStart === "number" ? el.selectionStart : value.length;
-  const end = typeof el.selectionEnd === "number" ? el.selectionEnd : value.length;
-  const before = value.slice(0, start);
-  const after = value.slice(end);
-  el.value = before + text + after;
-  const pos = start + text.length;
-  try {
-    el.setSelectionRange(pos, pos);
-  } catch {}
-  el.focus();
-}
-
 function putPromptInInput(text, opts = {}) {
   const replace = Boolean(opts.replace);
   const prompt = cleanStr(text);
@@ -382,14 +410,14 @@ function triggerDeleteSensiMessages() {
       const ids = Array.isArray(resp.messageIds) ? resp.messageIds : [];
       if (ids.length) ids.forEach((id) => removeMessageNode(id));
       if (!ids.length) removeAllVisibleSensiMessages();
-      addSystem("Messages de Sensi supprimés ✅");
+      addSystem("🧹 Messages de Sensi supprimés ✅");
       return;
     }
 
     socket.emit("deleteSensi", payload, (legacyResp) => {
       if (legacyResp?.ok) {
         removeAllVisibleSensiMessages();
-        addSystem("Messages de Sensi supprimés ✅");
+        addSystem("🧹 Messages de Sensi supprimés ✅");
         return;
       }
 
@@ -428,21 +456,7 @@ function triggerProjectExport() {
   socket.emit("exportProject", { project: currentProject }, (resp) => {
     if (resp?.ok && resp?.url) {
       window.open(resp.url, "_blank", "noopener");
-      addSystem(`Export projet prêt ✅ (${currentProject})`);
-      return;
-    }
-
-    if (resp?.ok && resp?.content) {
-      const blob = new Blob([resp.content], { type: "application/json;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${currentProject}_export.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      addSystem(`Export projet téléchargé ✅ (${currentProject})`);
+      addSystem(`📦 Export projet prêt ✅ (${currentProject})`);
       return;
     }
 
@@ -481,7 +495,7 @@ function triggerProjectShare() {
     socket.emit("shareProject", { project: currentProject, email }, (resp) => {
       if (resp?.ok) {
         window.location.href = buildMailtoForProjectShare(currentProject, email);
-        addSystem(`Partage prêt ✅ (${currentProject} → ${email})`);
+        addSystem(`📨 Partage prêt ✅ (${currentProject} → ${email})`);
         return;
       }
       window.location.href = buildMailtoForProjectShare(currentProject, email);
@@ -516,31 +530,42 @@ function ensureSensiBar() {
   top.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:center;";
 
   const title = document.createElement("strong");
-  title.textContent = "✨ Sensi";
+  title.textContent = "✨ Sensi 💫";
   title.style.cssText = "font-size:14px;";
 
   sensiHint = document.createElement("span");
   sensiHint.style.cssText = "font-size:12px;color:#666;";
-  sensiHint.textContent = "Copilot prêt.";
+  sensiHint.textContent = "✨ Copilot prêt.";
+
+  soundToggleBtn = document.createElement("button");
+  soundToggleBtn.type = "button";
+  soundToggleBtn.style.cssText = "border:1px solid #ddd;background:#fff;border-radius:999px;padding:4px 8px;cursor:pointer;font-size:11px;";
+  refreshSoundToggle();
+  soundToggleBtn.addEventListener("click", () => {
+    soundEnabled = !soundEnabled;
+    try { localStorage.setItem(LS_SOUND_ENABLED, soundEnabled ? "1" : "0"); } catch {}
+    refreshSoundToggle();
+  });
 
   top.appendChild(title);
   top.appendChild(sensiHint);
+  top.appendChild(soundToggleBtn);
 
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;align-items:center;";
 
   const buttons = [
-    { label: "Analyser fichier", action: "analyze-latest" },
-    { label: "Résumer", action: "summarize" },
-    { label: "Web", action: "web" },
-    { label: "Word", action: "docx" },
-    { label: "Excel", action: "xlsx" },
-    { label: "PPT", action: "pptx" },
-    { label: "Image", action: "image" },
-    { label: "Effacer Sensi", action: "delete-sensi" },
-    { label: "Export projet", action: "export-project" },
-    { label: "Share project", action: "toggle-share-project" },
-    { label: "Aide", action: "help" },
+    { label: "✨ Analyser fichier", action: "analyze-latest" },
+    { label: "📝 Résumer", action: "summarize" },
+    { label: "🌐 Web", action: "web" },
+    { label: "📄 Word", action: "docx" },
+    { label: "📊 Excel", action: "xlsx" },
+    { label: "📽️ PPT", action: "pptx" },
+    { label: "🖼️ Image", action: "image" },
+    { label: "🧹 Effacer Sensi", action: "delete-sensi" },
+    { label: "📦 Export projet", action: "export-project" },
+    { label: "📨 Share project", action: "toggle-share-project" },
+    { label: "❓ Aide", action: "help" },
   ];
 
   for (const item of buttons) {
@@ -576,7 +601,7 @@ function ensureSensiBar() {
 
   const fillBtn = document.createElement("button");
   fillBtn.type = "button";
-  fillBtn.textContent = "Mettre dans le message";
+  fillBtn.textContent = "✍️ Mettre dans le message";
   fillBtn.dataset.sensiAction = "fill-input";
   fillBtn.style.cssText = [
     "border:1px solid #ddd",
@@ -589,7 +614,7 @@ function ensureSensiBar() {
 
   const sendBtn = document.createElement("button");
   sendBtn.type = "button";
-  sendBtn.textContent = "Envoyer à Sensi";
+  sendBtn.textContent = "🚀 Envoyer à Sensi";
   sendBtn.dataset.sensiAction = "send-quick";
   sendBtn.style.cssText = [
     "border:1px solid #d8c8ff",
@@ -608,7 +633,7 @@ function ensureSensiBar() {
   shareProjectWrap.style.cssText = "display:none;gap:8px;align-items:center;flex-wrap:wrap;";
 
   const shareLabel = document.createElement("span");
-  shareLabel.textContent = "Email :";
+  shareLabel.textContent = "📧 Email :";
   shareLabel.style.cssText = "font-size:12px;color:#555;";
 
   shareProjectEmailInput = document.createElement("input");
@@ -625,7 +650,7 @@ function ensureSensiBar() {
 
   shareProjectSendBtn = document.createElement("button");
   shareProjectSendBtn.type = "button";
-  shareProjectSendBtn.textContent = "Préparer le partage";
+  shareProjectSendBtn.textContent = "📨 Préparer le partage";
   shareProjectSendBtn.dataset.sensiAction = "send-share-project";
   shareProjectSendBtn.style.cssText = [
     "border:1px solid #ddd",
@@ -788,17 +813,11 @@ async function refreshHealth() {
     const version = cleanStr(data.version || "unknown");
     const ai = cleanStr(data.ai || "");
     const model = cleanStr(data.ai_model_text || "");
-    const autoAnalyze = Boolean(data?.features?.file_analysis);
 
     setHealthStatus(`ok (${version})`);
     setAiStatus(ai === "enabled" ? `enabled (${model || "model?"})` : "disabled");
 
     lastDetectedAiEnabled = ai === "enabled";
-
-    if (uploadState && autoAnalyze && cleanStr(uploadState.textContent) === "") {
-      // no-op volontaire
-    }
-
     refreshSensiBarState();
   } catch {
     setHealthStatus("offline?");
@@ -836,13 +855,11 @@ function renderAttachment(att) {
     <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
       <button type="button"
         data-ai-quick="analyze-latest"
-        title="Demander à Sensi d’analyser le dernier fichier"
         style="border:1px solid #ddd;background:#fff;border-radius:999px;padding:4px 8px;cursor:pointer;font-size:11px;">
         ✨ Analyser
       </button>
       <button type="button"
         data-ai-quick="summarize-latest"
-        title="Demander un résumé du dernier fichier"
         style="border:1px solid #ddd;background:#fff;border-radius:999px;padding:4px 8px;cursor:pointer;font-size:11px;">
         📝 Résumer
       </button>
@@ -853,8 +870,7 @@ function renderAttachment(att) {
     return `
       <div style="margin-top:6px;">
         <a href="${url}" target="_blank" rel="noopener">🖼️ ${name}</a><br/>
-        <img src="${url}" alt="${name}"
-             style="max-width:260px; border:1px solid #ddd; border-radius:10px; margin-top:6px;" />
+        <img src="${url}" alt="${name}" style="max-width:260px; border:1px solid #ddd; border-radius:10px; margin-top:6px;" />
         ${actionButtons}
       </div>
     `;
@@ -918,6 +934,7 @@ function addMessage({ id, ts, username, userId, message, attachment }) {
   chat.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
 
+  if (isSensi) playNotify();
   if (Number.isFinite(mid)) messageNodes.set(mid, row);
 }
 
@@ -962,13 +979,8 @@ chat.addEventListener("click", (e) => {
   if (!aiBtn) return;
 
   const action = cleanStr(aiBtn.getAttribute("data-ai-quick"));
-  if (action === "analyze-latest") {
-    sendAssistantPrompt(inferNaturalAnalyzePrompt());
-    return;
-  }
-  if (action === "summarize-latest") {
-    sendAssistantPrompt("Sensi résume ce fichier envoyé");
-  }
+  if (action === "analyze-latest") return sendAssistantPrompt(inferNaturalAnalyzePrompt());
+  if (action === "summarize-latest") return sendAssistantPrompt("Sensi résume ce fichier envoyé");
 });
 
 /* ======================================================
@@ -1029,7 +1041,7 @@ function setProjectsOptions(projects, keepSelection = true) {
 }
 
 /* ======================================================
-   Presence rendering (tolerant)
+   Presence rendering
    ====================================================== */
 
 function renderPresence(users) {
@@ -1054,7 +1066,7 @@ function renderPresence(users) {
 }
 
 /* ======================================================
-   Upload / send message
+   Upload / paste / send message
    ====================================================== */
 
 const UPLOAD_ENDPOINT = "/upload";
@@ -1074,6 +1086,48 @@ async function uploadFile(file) {
   if (!res.ok || !data.ok) throw new Error(data.error || `Upload failed (${res.status})`);
   return data;
 }
+
+async function uploadPastedFile(file) {
+  try {
+    if (!currentProject) {
+      alert("Rejoins un projet avant de coller un fichier 🙂");
+      return;
+    }
+    setUploadState(`Collage "${file.name || "fichier"}"...`);
+    const data = await uploadFile(file);
+    lastUploadedFileInfo = {
+      filename: cleanStr(data?.filename || file.name),
+      mimetype: cleanStr(data?.mimetype || file.type),
+      size: Number(data?.size || file.size || 0),
+      url: cleanStr(data?.url),
+      auto_analyze: Boolean(data?.auto_analyze),
+    };
+    setUploadState(data?.auto_analyze ? "📎 Collage OK ✅ analyse automatique en cours…" : "📎 Collage OK ✅");
+    refreshSensiBarState();
+    setTimeout(() => { setUploadState(""); }, 2500);
+  } catch (err) {
+    console.error(err);
+    alert(`Erreur collage: ${err?.message || err}`);
+    setUploadState("");
+  }
+}
+
+document.addEventListener("paste", async (e) => {
+  const items = Array.from(e.clipboardData?.items || []);
+  if (!items.length) return;
+
+  for (const item of items) {
+    if (item.kind === "file") {
+      const file = item.getAsFile();
+      if (!file) continue;
+      const ext = file.type.startsWith("image/") ? "png" : "bin";
+      const named = new File([file], file.name || `paste_${Date.now()}.${ext}`, { type: file.type || "application/octet-stream" });
+      e.preventDefault();
+      await uploadPastedFile(named);
+      return;
+    }
+  }
+});
 
 function sendTextMessage(text, options = {}) {
   if (!currentProject) {
@@ -1140,7 +1194,6 @@ const VOICE_TRIGGERS = [
 
 const FIREFOX_FORCE_USER_GESTURE_BEFORE_AUDIOCTX = true;
 
-// FFT
 const SHOW_FFT = true;
 const FFT_FPS = 30;
 const FFT_BINS = 64;
@@ -1149,7 +1202,6 @@ const FFT_FFTSIZE = 2048;
 const FFT_MIN_DB = -90;
 const FFT_MAX_DB = -10;
 
-// Audio record
 const AUDIO_MIME_PREFERRED = "audio/webm;codecs=opus";
 const AUDIO_MAX_SECONDS = 120;
 
@@ -1253,11 +1305,8 @@ function pickAudioMime() {
   return "";
 }
 
-// Voice state
 let recognition = null;
 let isListening = false;
-let voiceMode = null;
-
 let mediaStream = null;
 let audioCtx = null;
 let analyser = null;
@@ -1292,6 +1341,7 @@ function updateVoiceUiGate() {
   btnRec.disabled = !ok;
   btnSendRec.disabled = !ok || !recBlob;
   if (!ok && voiceHint) voiceHint.textContent = "🔒 Rejoins un projet pour activer la voix.";
+
 }
 
 function ensureVoiceUI() {
@@ -1316,7 +1366,7 @@ function ensureVoiceUI() {
 
   voiceHint = document.createElement("span");
   voiceHint.style.cssText = "color:#666;font-size:12px;";
-  voiceHint.textContent = `Dites “… ${VOICE_OVER_WORD}” pour envoyer.`;
+  voiceHint.textContent = `🎧 Dites “… ${VOICE_OVER_WORD}” pour envoyer.`;
 
   fftCanvas = document.createElement("canvas");
   fftCanvas.width = 360;
@@ -1359,7 +1409,7 @@ function ensureVoiceUI() {
       const data = await uploadFile(file);
       recBlob = null;
       lastUploadedFileInfo = data || null;
-      setUploadState(data?.auto_analyze ? "Audio envoyé ✅ analyse automatique en cours…" : "Audio envoyé ✅");
+      setUploadState(data?.auto_analyze ? "🎙️ Audio envoyé ✅ analyse automatique en cours…" : "🎙️ Audio envoyé ✅");
       setTimeout(() => { setUploadState(""); }, 2500);
       refreshSensiBarState();
     } catch (e) {
@@ -1490,7 +1540,6 @@ async function startListening() {
   }
 
   if (("webkitSpeechRecognition" in window) || ("SpeechRecognition" in window)) {
-    voiceMode = "speech";
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SR();
     recognition.continuous = true;
@@ -1555,8 +1604,6 @@ async function startListening() {
     return;
   }
 
-  voiceMode = "segment";
-  segAccumulatedText = "";
   if (voiceHint) voiceHint.textContent = `🎧 Dictée Firefox : parle, puis dis "${VOICE_OVER_WORD}" / "hover" / "ouvre" / "terminé" / "au revoir" pour envoyer.`;
 
   const SEG_MS = 4000;
@@ -1602,9 +1649,7 @@ async function startListening() {
               voiceHint.textContent = `🗣️ ${p}${preview.length > 90 ? "…" : ""}`;
             }
 
-            if (VOICE_APPEND_TO_INPUT) {
-              input.value = composeVoiceInput(preview);
-            }
+            if (VOICE_APPEND_TO_INPUT) input.value = composeVoiceInput(preview);
 
             if (VOICE_SEND_ON_OVER && hasVoiceTriggerAtEnd(segAccumulatedText)) {
               const msg = cleanStr(composeVoiceInput(stripVoiceTriggerAtEnd(segAccumulatedText)));
@@ -1660,7 +1705,6 @@ function stopListening() {
   segChunks = [];
   segInFlight = false;
   segAccumulatedText = "";
-  voiceMode = null;
   voiceInputBase = "";
 
   stopFft();
@@ -1750,7 +1794,7 @@ form.addEventListener("submit", async (e) => {
         auto_analyze: Boolean(data?.auto_analyze),
       };
 
-      setUploadState(data?.auto_analyze ? "Upload OK ✅ analyse automatique en cours…" : "Upload OK ✅");
+      setUploadState(data?.auto_analyze ? "📎 Upload OK ✅ analyse automatique en cours…" : "📎 Upload OK ✅");
       if (fileInput) fileInput.value = "";
       input.value = "";
       input.focus();
@@ -1807,7 +1851,7 @@ function joinProject(options = {}) {
 
   renderPresence([]);
   clearChat();
-  addSystem(`Connexion au projet "${currentProject}"...`);
+  addSystem(`🚀 Connexion au projet "${currentProject}"...`);
 
   socket.emit("joinProject", { username: currentUsername, project: currentProject, userId: myUserId });
   socket.emit("getProjects");
@@ -1850,7 +1894,7 @@ if (createProjectBtn && newProjectInput) {
       if (resp.project) projectSelect.value = resp.project;
 
       refreshDeleteProjectState();
-      addSystem(`✅ Projet créé: "${resp.project}"`);
+      addSystem(`🚀 Projet créé: "${resp.project}" ✅`);
       refreshSensiBarState();
     });
   };
@@ -1912,7 +1956,7 @@ async function loadProjectsOnce() {
     updateVoiceUiGate();
     refreshSensiBarState();
     return;
-  } catch (_) {}
+  } catch {}
 
   setProjectsOptions([DEFAULT_PROJECT], true);
   refreshDeleteProjectState();
@@ -1969,8 +2013,8 @@ async function initSocket() {
     if (!currentProject || p !== currentProject) return;
 
     clearChat();
-    if (msgs.length === 0) return addSystem(`Historique vide pour "${currentProject}".`);
-    addSystem(`Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
+    if (msgs.length === 0) return addSystem(`📭 Historique vide pour "${currentProject}".`);
+    addSystem(`📚 Historique chargé pour "${currentProject}" (${msgs.length} message(s)).`);
 
     for (const m of msgs) {
       addMessage(m);
@@ -2058,7 +2102,7 @@ async function initSocket() {
       currentProject = null;
       setProjectLabel("—");
       clearChat();
-      addSystem("Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
+      addSystem("⚠️ Le projet courant a été supprimé. Choisis un autre projet puis Rejoindre.");
       renderPresence([]);
     }
 
@@ -2075,7 +2119,7 @@ async function initSocket() {
       projectSelect.value = fallback;
       setProjectLabel(fallback);
       clearChat();
-      addSystem(`Le projet "${p}" a été supprimé. Bascule automatique vers "${fallback}".`);
+      addSystem(`⚠️ Le projet "${p}" a été supprimé. Bascule automatique vers "${fallback}".`);
       renderPresence([]);
       pendingJoinRequested = true;
       flushPendingJoinIfNeeded();
