@@ -1,6 +1,6 @@
 {
   "name": "sensi-collaboration",
-  "version": "3.8.1",
+  "version": "3.8.2",
   "description": "Sensi IA travail collaboratif",
   "main": "server.js",
   "type": "commonjs",
@@ -10,8 +10,12 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "docx": "^9.6.0",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
+    "multer": "^2.1.1",
     "openai": "^4.104.0",
+    "pptxgenjs": "^4.0.1",
     "socket.io": "^4.8.1"
   }
 }

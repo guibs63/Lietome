@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sensi-IA_travail_collaboratif</title>
+
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <style>
+    :root{
+      --bg:#f7f7fb;
+      --panel:#ffffff;
+      --border:#dcdde6;
+      --text:#1f2430;
+      --muted:#666;
+      --ok:#126a2b;
+      --warn:#8a1f11;
+      --soft:#f3f4f8;
+      --danger-bg:#fff5f5;
+      --danger-bd:#f2b8b5;
+      --accent:#7c3aed;
+      --accent-soft:#f7f2ff;
+      --accent-border:#d8c8ff;
+      --system:#f8fafc;
+    }
+
+    *{ box-sizing:border-box; }
+
+    html, body{
+      min-height:100%;
+    }
+
+    body{
+      font-family: Arial, sans-serif;
+      margin:20px;
+      max-width:1100px;
+      background:var(--bg);
+      color:var(--text);
+    }
+
+    h1{
+      margin:0 0 10px 0;
+      font-size:28px;
+      line-height:1.2;
+    }
+
+    h2, h3{
+      color:var(--text);
+    }
+
+    input, select, button, textarea{
+      padding:8px;
+      font-size:14px;
+      font-family:inherit;
+    }
+
+    button{
+      cursor:pointer;
+    }
+
+    a{
+      color:#0f62fe;
+      text-decoration:none;
+    }
+
+    a:hover{
+      text-decoration:underline;
+    }
+
+    .topbar{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      margin-bottom:10px;
+    }
+
+    .hint{
+      color:var(--muted);
+      font-size:12px;
+      margin:6px 0 12px;
+      line-height:1.45;
+    }
+
+    .layout{
+      display:grid;
+      grid-template-columns:1fr 260px;
+      gap:12px;
+      align-items:start;
+    }
+
+    @media (max-width: 900px){
+      .layout{
+        grid-template-columns:1fr;
+      }
+    }
+
+    #chat{
+      border:1px solid var(--border);
+      height:460px;
+      overflow-y:auto;
+      padding:10px;
+      background:#fff;
+      border-radius:10px;
+      box-shadow:0 1px 2px rgba(0,0,0,.03);
+    }
+
+    .msg{
+      margin-bottom:8px;
+      line-height:1.35;
+      word-break:break-word;
+    }
+
+    .msg-row{
+      padding:8px 10px;
+      border:1px solid #f0f0f3;
+      background:#fff;
+      border-radius:10px;
+      margin-bottom:8px;
+    }
+
+    .msg-main{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+    }
+
+    .msg .time{
+      color:#666;
+      margin-right:6px;
+      font-size:12px;
+    }
+
+    .msg.system{
+      color:#444;
+      opacity:0.95;
+      background:var(--system);
+      border:1px dashed #e2e8f0;
+      padding:8px 10px;
+      border-radius:10px;
+    }
+
+    .msg strong{
+      font-weight:700;
+    }
+
+    form#chat-form{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      margin-top:12px;
+      flex-wrap:wrap;
+    }
+
+    #message{
+      flex:1;
+      min-width:220px;
+    }
+
+    #file{
+      max-width:340px;
+    }
+
+    .upload-state{
+      font-size:12px;
+      color:#666;
+    }
+
+    .panel{
+      border:1px solid var(--border);
+      background:var(--panel);
+      padding:10px;
+      border-radius:10px;
+      box-shadow:0 1px 2px rgba(0,0,0,.03);
+    }
+
+    .panel h3{
+      margin:0 0 8px 0;
+      font-size:15px;
+    }
+
+    .badge{
+      display:inline-block;
+      padding:2px 8px;
+      border:1px solid #ddd;
+      border-radius:999px;
+      font-size:12px;
+      color:#444;
+      margin-left:6px;
+      background:#fff;
+    }
+
+    #users{
+      list-style:none;
+      padding:0;
+      margin:0;
+    }
+
+    #users li{
+      padding:6px 8px;
+      border-bottom:1px solid #f0f0f0;
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+      align-items:center;
+    }
+
+    #users li:last-child{
+      border-bottom:none;
+    }
+
+    .danger{
+      border:1px solid var(--danger-bd);
+      background:var(--danger-bg);
+      color:#7a1a12;
+    }
+
+    #statusbar{
+      margin:8px 0 12px;
+      padding:8px 10px;
+      border:1px dashed rgba(0,0,0,.18);
+      border-radius:10px;
+      background:#fff;
+      font-size:12px;
+      color:#444;
+      line-height:1.5;
+    }
+
+    #statusbar code{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .warn{ color:var(--warn); }
+    .ok{ color:var(--ok); }
+
+    .hero-note{
+      margin:0 0 12px;
+      font-size:13px;
+      color:#444;
+      line-height:1.5;
+    }
+
+    .section-card{
+      background:#fff;
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:12px;
+      margin-bottom:12px;
+      box-shadow:0 1px 2px rgba(0,0,0,.03);
+    }
+
+    .section-card h2{
+      margin:0 0 8px 0;
+      font-size:16px;
+    }
+
+    .quick-tips{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:8px;
+    }
+
+    .quick-tip{
+      border:1px dashed #d6d6de;
+      border-radius:999px;
+      background:#fff;
+      padding:5px 9px;
+      font-size:11px;
+      color:#555;
+      cursor:pointer;
+      user-select:none;
+      transition:all .15s ease;
+    }
+
+    .quick-tip:hover{
+      border-color:#c8b5ff;
+      background:#faf6ff;
+      color:#3f2a78;
+    }
+
+    #chat-form button[type="submit"]{
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:10px;
+    }
+
+    #join-btn,
+    #create-project-btn{
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:10px;
+    }
+
+    #new-project,
+    #username,
+    #project,
+    #message,
+    #file{
+      border:1px solid #ddd;
+      border-radius:10px;
+      background:#fff;
+      color:var(--text);
+    }
+
+    #message:focus,
+    #username:focus,
+    #new-project:focus,
+    #project:focus{
+      outline:none;
+      border-color:#c8b5ff;
+      box-shadow:0 0 0 3px rgba(124,58,237,.08);
+    }
+
+    .soft-line{
+      margin:10px 0;
+      height:1px;
+      background:#eee;
+      border:0;
+    }
+
+    #voice-bar{
+      margin-top:10px;
+      padding:10px;
+      border:1px solid #e8e8e8;
+      border-radius:12px;
+      background:#fafafa;
+    }
+
+    #voice-bar button{
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:10px;
+    }
+
+    #voice-bar canvas{
+      max-width:100%;
+    }
+
+    #sensi-bar{
+      margin-top:10px;
+      padding:10px;
+      border:1px solid #e8e8e8;
+      border-radius:12px;
+      background:#fafafa;
+    }
+
+    #sensi-bar button{
+      border:1px solid #ddd;
+      background:#fff;
+      border-radius:999px;
+    }
+
+    #sensi-bar input[type="text"],
+    #sensi-bar input[type="email"]{
+      border:1px solid #ddd;
+      border-radius:10px;
+      background:#fff;
+    }
+
+    .sensi-note{
+      margin-top:8px;
+      font-size:12px;
+      color:#555;
+      line-height:1.45;
+    }
+
+    .footer-note{
+      margin-top:12px;
+      font-size:11px;
+      color:#666;
+      line-height:1.5;
+    }
+
+    .mono{
+      font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Sensi-IA_travail_collaboratif 🚀</h1>
+
+  <p class="hero-note">
+    Workspace collaboratif temps réel avec chat, fichiers, audio, projets et copilot IA.
+  </p>
+
+  <div id="statusbar">
+    Statut: <span id="status-text">chargement…</span>
+    <span id="socket-status-host"></span>
+  </div>
+
+  <div class="section-card">
+    <h2>Connexion</h2>
+
+    <div class="topbar">
+      <input type="text" id="username" placeholder="Pseudo" autocomplete="nickname" />
+      <select id="project"></select>
+      <button id="join-btn" type="button">Rejoindre</button>
+    </div>
+
+    <div class="topbar">
+      <input type="text" id="new-project" placeholder="Nouveau projet (ex: EverCell)" />
+      <button id="create-project-btn" type="button">+ Créer</button>
+      <button id="delete-project-btn" type="button" class="danger" title="Le projet global est protégé">
+        🗑️ Supprimer ce projet
+      </button>
+    </div>
+
+    <div class="hint">
+      Le projet <strong>global</strong> est créé par défaut et protégé.
+      Le dernier projet restant ne peut pas être supprimé.
+    </div>
+  </div>
+
+  <div class="section-card">
+    <h2>Aide rapide</h2>
+
+    <div class="hint">
+      🎧 Reconnaissance vocale : dicte ton message puis dis <strong>"over"</strong>
+      (ou <strong>"hover"</strong> / <strong>"ouvre"</strong> / <strong>"terminé"</strong> / <strong>"au revoir"</strong>)
+      pour envoyer automatiquement.<br/>
+      📊 FFT affichée pendant l'écoute / l'enregistrement.<br/>
+      🎙️ Envoi audio : <strong>Enregistrer → Envoyer audio</strong>.<br/>
+      ✨ La barre Sensi ajoute aussi :
+      <strong>Effacer Sensi</strong>, <strong>Export projet</strong>, <strong>Share project</strong>,
+      ainsi que les raccourcis Word / Excel / PPT / Image.
+    </div>
+
+    <div class="quick-tips">
+      <span class="quick-tip" data-prompt="bonjour sensi">bonjour sensi</span>
+      <span class="quick-tip" data-prompt="Sensi analyse ce fichier">Sensi analyse ce fichier</span>
+      <span class="quick-tip" data-prompt="Sensi résume ce document">Sensi résume ce document</span>
+      <span class="quick-tip" data-prompt="Sensi cherche sur le web les dernières infos">Sensi cherche sur le web les dernières infos</span>
+      <span class="quick-tip" data-prompt="/docx brief">/docx brief</span>
+      <span class="quick-tip" data-prompt="/xlsx brief">/xlsx brief</span>
+      <span class="quick-tip" data-prompt="/pptx brief">/pptx brief</span>
+      <span class="quick-tip" data-prompt="/image brief">/image brief</span>
+      <span class="quick-tip" data-prompt="mémorise ça : Mel est mon épouse">mémorise ça : Mel est mon épouse</span>
+      <span class="quick-tip" data-prompt="tu peux me tutoyer">tu peux me tutoyer</span>
+      <span class="quick-tip" data-prompt="*flowers*">*flowers*</span>
+    </div>
+
+    <div class="sensi-note">
+      Les boutons avancés Sensi sont injectés dynamiquement par <span class="mono">client.js</span>
+      après chargement du socket.
+    </div>
+  </div>
+
+  <div class="layout">
+    <div>
+      <div id="chat" aria-live="polite"></div>
+
+      <form id="chat-form" autocomplete="off">
+        <input type="text" id="message" placeholder="Message..." autocomplete="off" />
+        <input
+          type="file"
+          id="file"
+          accept="image/*,audio/*,.pdf,.txt,.md,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.json,.xml,.html"
+        />
+        <button type="submit">Envoyer</button>
+        <span class="upload-state" id="upload-state"></span>
+      </form>
+
+      <div class="footer-note">
+        Les actions audio, Sensi et partage projet sont ajoutées côté client une fois
+        <span class="mono">Socket.IO</span> prêt.
+      </div>
+    </div>
+
+    <aside class="panel">
+      <h3>Users en ligne <span class="badge" id="users-count">—</span></h3>
+
+      <div class="hint" style="margin:0 0 8px;">
+        Projet : <strong id="current-project-label">—</strong>
+      </div>
+
+      <hr class="soft-line" />
+
+      <ul id="users"></ul>
+    </aside>
+  </div>
+
+  <script>
+    window.__SENSI_SOCKET_SOURCE__ = "";
+
+    (function loadSocketIO() {
+      const status = document.getElementById("status-text");
+      const sources = [
+        "/socket.io/socket.io.js",
+        "https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"
+      ];
+
+      function setSocketNote(text, cls) {
+        let note = document.getElementById("socket-script-note");
+        if (!note) {
+          note = document.createElement("span");
+          note.id = "socket-script-note";
+          note.style.marginLeft = "10px";
+          status.appendChild(note);
+        }
+        note.className = cls || "";
+        note.textContent = text;
+      }
+
+      function loadAt(index) {
+        if (index >= sources.length) {
+          setSocketNote("| Socket.IO indisponible (script non chargé)", "warn");
+          window.dispatchEvent(new CustomEvent("sensi:io-failed"));
+          return;
+        }
+
+        const src = sources[index];
+        const script = document.createElement("script");
+        script.src = src;
+        script.defer = true;
+
+        script.onload = () => {
+          if (typeof window.io === "function") {
+            window.__SENSI_SOCKET_SOURCE__ = src;
+            setSocketNote(`| Socket.IO chargé via ${src.startsWith("/") ? "serveur" : "CDN"}`, "ok");
+            window.dispatchEvent(new CustomEvent("sensi:io-ready", { detail: { src } }));
+            return;
+          }
+          loadAt(index + 1);
+        };
+
+        script.onerror = () => loadAt(index + 1);
+        document.head.appendChild(script);
+      }
+
+      setSocketNote("| Chargement Socket.IO…", "");
+      loadAt(0);
+    })();
+  </script>
+
+  <script defer src="/client.js"></script>
+
+  <script>
+    (async () => {
+      const el = document.getElementById("status-text");
+
+      try {
+        const res = await fetch("/health", { cache: "no-store" });
+        const data = await res.json();
+
+        const v = data.version || "?";
+        const ai = data.ai || "?";
+        const web = data.web || "";
+
+        el.innerHTML = `<span class="ok">OK ✅</span> | <code>${v}</code> | AI: <code>${ai}</code> | Web: <code>${web}</code>`;
+      } catch {
+        el.innerHTML = `<span class="warn">offline / health unreachable</span>`;
+      }
+    })();
+  </script>
+</body>
+</html>
